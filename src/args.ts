@@ -47,5 +47,17 @@ Usage:
   dsh --profile pi-tui --help          this help
 
 Keys:
-  Ctrl+C      quit
-  Ctrl+O      toggle expanded reasoning blocks`
+  Esc        interrupt · cancel autocomplete
+  Ctrl+C     running→interrupt · text→clear · empty→again exits
+  Ctrl+D     exit when the editor is empty
+  Ctrl+T     toggle thinking display
+  Ctrl+O     toggle full tool output
+  Ctrl+L     model picker · Shift+Tab cycle thinking
+  Tab        complete paths · / slash commands · @ attach files
+
+Commands:
+  /model [query]          switch model (picker without a query)
+  /thinking off|high|max  set thinking effort (next step)
+  /skills                 list user-invocable skills
+  /hotkeys                this key table
+  /compact /goal /plan /feedback   official dsh commands`

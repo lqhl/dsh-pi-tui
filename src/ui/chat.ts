@@ -6,15 +6,26 @@
  * sticks to the bottom (the last rendered lines), and scrollback is the
  * terminal's native buffer.
  *
- * Events flow in through `handleEvent()` (replay + live subscription from
- * the app layer); the screen folds them into the model and reconciles the
- * component tree, requesting one diff frame per batch.
+ * Key semantics (pi / Claude Code conventions):
+ *   Esc        interrupt (cancel the running turn; editor cancels autocomplete)
+ *   Ctrl+C     running → interrupt; idle+text → clear editor; idle+empty →
+ *              arm, second press within 500ms exits
+ *   Ctrl+D     exit when the editor is empty (else editor delete-forward)
+ *   Ctrl+T     toggle thinking display
+ *   Ctrl+O     toggle full tool output
+ *   Ctrl+L     open the model picker
+ *   Shift+Tab  cycle thinking effort
  */
-import { basename } from 'node:path'
+import { basename, relative } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import {
+  installModelSelection,
+  type ModelSelectionRef,
+} from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import { isUserInvocable, type SkillSummary } from '@deepseek-ai/dsh-skill'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   CombinedAutocompleteProvider,
@@ -22,12 +33,17 @@ import {
   Editor,
   Loader,
   TuiMainScreen,
+  isKeyRelease,
   matchesKey,
+  type SlashCommand,
   type TUI,
 } from '@earendil-works/pi-tui'
 import { applyEvent, createModel, pushNotice, type ChatModel } from '../core/model.js'
+import { ctrlC, cycleEffort, parseSlash, type ExitArm } from '../core/keys.js'
 import { editorTheme, style } from './theme.js'
 import { createView, StatusBar, updateView, type StatusBarData } from './views.js'
+import { listAllModels, pickModel, type LlmRuntimeLike, type ModelRoute } from './model-picker.js'
+import { pickFromList } from './overlays.js'
 
 export interface ChatScreenOptions {
   ctx: Context
@@ -41,6 +57,13 @@ export interface ChatScreenOptions {
   onQuit: () => void
 }
 
+interface LlmRuntime extends LlmRuntimeLike {
+  resolveModelInfo(provider: string, model: string): Promise<{
+    reasoning?: { efforts?: { id: string; name: string; description?: string }[]; defaultEffort?: string }
+  }>
+  resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>
+}
+
 export class ChatScreen {
   private readonly ctx: Context
   private readonly tui: TUI
@@ -52,9 +75,14 @@ export class ChatScreen {
   private readonly messages = new Container()
   private readonly statusBar = new StatusBar()
   private readonly editor: Editor
+  /** One-per-agent mutable model selection (grok/web pattern; install once). */
+  private readonly selection: ModelSelectionRef = { current: undefined, assembled: undefined }
+  private exitArm: ExitArm = { lastPressAt: 0 }
   private workingLoader: Loader | undefined
   private readonly views = new Map<number, ReturnType<typeof createView>>()
   private expandReasoning = false
+  private expandTools = false
+  private atPickerOpen = false
 
   constructor(options: ChatScreenOptions) {
     this.ctx = options.ctx
@@ -63,6 +91,7 @@ export class ChatScreen {
     this.config = options.config
     this.cwd = options.config.cwd ?? process.cwd()
     this.commands = this.ctx.get('commands') as CommandRuntime | undefined
+    installModelSelection(this.agent.ctx, this.selection)
 
     this.tui.addChild(this.messages)
     this.tui.addChild(this.statusBar)
@@ -70,27 +99,75 @@ export class ChatScreen {
     this.editor.onSubmit = (text) => {
       this.submit(text)
     }
-    if (this.commands !== undefined) {
-      // pi-tui's combined provider: slash commands from the live registry
-      // plus file-path completion anchored at the session cwd.
-      const slashCommands = this.commands
-        .list(this.agent)
-        .map((descriptor) => ({ name: descriptor.name, description: descriptor.description }))
-      this.editor.setAutocompleteProvider(
-        new CombinedAutocompleteProvider(slashCommands, this.cwd),
-      )
+    this.editor.onChange = (text) => {
+      this.maybeOpenAtPicker(text)
     }
+
+    // pi-tui's combined provider: slash commands (official + local UI
+    // commands) plus file-path completion anchored at the session cwd.
+    const slashCommands: SlashCommand[] = [
+      ...(this.commands?.list(this.agent) ?? []).map((descriptor) => ({
+        name: descriptor.name,
+        description: descriptor.description,
+      })),
+      { name: 'model', description: 'Switch model', getArgumentCompletions: (prefix) => this.modelCompletions(prefix) },
+      { name: 'thinking', description: 'Set thinking effort (off/high/max)' },
+      { name: 'skills', description: 'List user-invocable skills' },
+      { name: 'hotkeys', description: 'Show key bindings' },
+    ]
+    this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(slashCommands, this.cwd))
     this.tui.addChild(this.editor)
     this.tui.setFocus(this.editor)
 
     this.tui.addInputListener((data: string) => {
-      if (matchesKey(data, 'ctrl+o')) {
+      // Global listeners see raw chunks BEFORE the focused-component path,
+      // which filters kitty key-release events — do the same here, or every
+      // functional key (Ctrl+C/D/T/O/L, Esc, Shift+Tab) fires twice.
+      if (isKeyRelease(data)) return undefined
+      if (matchesKey(data, 'escape')) {
+        if (this.isWorking()) {
+          this.interrupt()
+          return { consume: true }
+        }
+        return undefined // editor cancels autocomplete, overlays close
+      }
+      if (matchesKey(data, 'ctrl+c')) {
+        const { action, state, arm } = ctrlC(
+          this.exitArm,
+          this.isWorking(),
+          this.editor.getText().length > 0,
+          Date.now(),
+        )
+        this.exitArm = state
+        if (action === 'cancel') this.interrupt()
+        else if (action === 'clear') this.editor.setText('')
+        else if (action === 'exit') options.onQuit()
+        if (arm) this.pushNotice('Press Ctrl+C again to exit')
+        return { consume: true }
+      }
+      if (matchesKey(data, 'ctrl+d')) {
+        if (this.editor.getText() === '' && !this.isWorking()) {
+          options.onQuit()
+          return { consume: true }
+        }
+        return undefined // editor handles delete-forward
+      }
+      if (matchesKey(data, 'ctrl+t')) {
         this.expandReasoning = !this.expandReasoning
         this.sync()
         return { consume: true }
       }
-      if (matchesKey(data, 'ctrl+c')) {
-        options.onQuit()
+      if (matchesKey(data, 'ctrl+o')) {
+        this.expandTools = !this.expandTools
+        this.sync()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'ctrl+l')) {
+        void this.openModelPicker()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'shift+tab')) {
+        void this.cycleThinking()
         return { consume: true }
       }
       return undefined
@@ -103,6 +180,14 @@ export class ChatScreen {
     // second stdin data listener and duplicate every keystroke.
   }
 
+  private isWorking(): boolean {
+    return this.model.working || this.agent.status === 'running'
+  }
+
+  private interrupt(): void {
+    this.agent.cancel({ kind: 'user' }, { keepInbox: true })
+  }
+
   /** Submit one human turn or dispatch a slash command. */
   submit(text: string): void {
     const trimmed = text.trim()
@@ -113,42 +198,325 @@ export class ChatScreen {
     this.editor.addToHistory(trimmed)
     this.editor.setText('')
     if (trimmed.startsWith('/')) {
-      void this.runCommand(trimmed)
+      void this.dispatchSlash(trimmed)
       return
     }
+    this.followup(trimmed)
+  }
+
+  private followup(text: string): void {
     this.agent.followup(
       createUserMessage({
-        content: [{ type: 'text', text: trimmed }],
+        content: [{ type: 'text', text }],
         source: { kind: 'user' },
       }),
     )
   }
 
-  /** Execute one slash command through the official registry and render it. */
-  private async runCommand(line: string): Promise<void> {
-    if (this.commands === undefined) {
-      this.pushNotice('no command registry mounted', 'error')
+  /** Route a slash line: local UI commands → official registry → skills. */
+  private async dispatchSlash(line: string): Promise<void> {
+    const parsed = parseSlash(line)
+    if (parsed === undefined) {
+      this.followup(line)
       return
     }
-    try {
-      const execution = await this.commands.execute(this.agent, line, new AbortController().signal)
-      if (execution === undefined) {
-        this.pushNotice(`unknown command: ${line}`, 'error')
+    if (parsed.name === 'model') return this.cmdModel(parsed.raw.trim())
+    if (parsed.name === 'thinking') return this.cmdThinking(parsed.raw.trim())
+    if (parsed.name === 'skills') return this.cmdSkills()
+    if (parsed.name === 'hotkeys') return this.cmdHotkeys()
+
+    if (this.commands !== undefined) {
+      try {
+        const execution = await this.commands.execute(this.agent, line, new AbortController().signal)
+        if (execution !== undefined) {
+          const result = execution.result
+          if (result.kind === 'success') this.pushNotice(result.text ?? line)
+          else this.pushNotice(result.text, 'error')
+          return
+        }
+      } catch (error) {
+        this.pushNotice(
+          `command failed: ${error instanceof Error ? error.message : String(error)}`,
+          'error',
+        )
         return
       }
-      const result = execution.result
-      if (result.kind === 'success') {
-        this.pushNotice(result.text ?? line)
-      } else {
-        this.pushNotice(result.text, 'error')
+    }
+
+    // User-invocable skills ride a plain `/skillname` message; the
+    // dsh-tool-skill pre-step gesture picks it up. Don't swallow it.
+    const skills = await this.listSkills()
+    if (skills.some((skill) => skill.name === parsed.name)) {
+      this.followup(line)
+      return
+    }
+    this.pushNotice(`unknown command: ${line}`, 'error')
+  }
+
+  // ── local UI commands ─────────────────────────────────────────────────────
+
+  private llm(): LlmRuntime | undefined {
+    return this.ctx.get('llm') as LlmRuntime | undefined
+  }
+
+  private currentRoute(): ModelRoute {
+    const current = this.selection.current
+    if (current !== undefined && current.provider !== undefined && current.model !== undefined) {
+      return { provider: current.provider, model: current.model }
+    }
+    if (this.model.route?.provider !== undefined && this.model.route?.model !== undefined) {
+      return { provider: this.model.route.provider, model: this.model.route.model }
+    }
+    return {
+      provider: this.config.provider ?? this.agent.options.provider ?? 'deepseek-official',
+      model: this.config.model ?? this.agent.options.model ?? 'deepseek-v4-flash',
+    }
+  }
+
+  private currentEffort(): string | undefined {
+    return this.selection.current?.reasoningEffort ?? this.model.effort
+  }
+
+  private async cmdModel(query: string): Promise<void> {
+    const llm = this.llm()
+    if (llm === undefined) {
+      this.pushNotice('llm service unavailable', 'error')
+      return
+    }
+    if (query !== '') {
+      const routes = await listAllModels(llm)
+      const match =
+        routes.find((route) => route.model === query) ??
+        routes.find((route) => route.model.toLowerCase().includes(query.toLowerCase()))
+      if (match !== undefined) {
+        await this.applyModel(match)
+        return
       }
+    }
+    const picked = await pickModel(this.tui, llm, this.currentRoute())
+    if (picked !== undefined) await this.applyModel(picked)
+  }
+
+  private async applyModel(route: ModelRoute): Promise<void> {
+    const llm = this.llm()
+    if (llm === undefined) return
+    try {
+      const resolved = await llm.resolveCallConfig({ provider: route.provider, model: route.model })
+      this.selection.current = { provider: resolved.provider, model: resolved.model }
+      // Write the shared default too (grok rationale: the web host's outer
+      // waterfall fallback chain reads it, so a stale selection can't
+      // overwrite this one).
+      try {
+        const defaults = this.ctx.get('agentDefaultModel') as
+          | { saveSelection(next: unknown): Promise<void> }
+          | undefined
+        await defaults?.saveSelection({ provider: resolved.provider, model: resolved.model })
+      } catch {
+        // Best effort; session selection already applied.
+      }
+      this.pushNotice(`model → ${resolved.model} (${resolved.provider}) · from the next step`)
+      this.sync()
     } catch (error) {
       this.pushNotice(
-        `command failed: ${error instanceof Error ? error.message : String(error)}`,
+        `model switch failed: ${error instanceof Error ? error.message : String(error)}`,
         'error',
       )
     }
   }
+
+  private async cmdThinking(effort: string): Promise<void> {
+    const llm = this.llm()
+    if (llm === undefined) {
+      this.pushNotice('llm service unavailable', 'error')
+      return
+    }
+    const route = this.currentRoute()
+    const info = await llm.resolveModelInfo(route.provider, route.model)
+    const efforts = info.reasoning?.efforts ?? []
+    if (effort === '' || !efforts.some((entry) => entry.id === effort)) {
+      const list = efforts.map((entry) => entry.id).join('|') || 'off|high|max'
+      this.pushNotice(
+        `thinking: ${list} · current: ${this.currentEffort() ?? info.reasoning?.defaultEffort ?? 'default'}`,
+      )
+      return
+    }
+    try {
+      await llm.resolveCallConfig({
+        provider: route.provider,
+        model: route.model,
+        reasoningEffort: ReasoningEffortId(effort),
+      })
+      this.selection.current = {
+        provider: route.provider,
+        model: route.model,
+        reasoningEffort: ReasoningEffortId(effort),
+      }
+      this.pushNotice(`thinking → ${effort} · from the next step`)
+      this.sync()
+    } catch (error) {
+      this.pushNotice(
+        `thinking switch failed: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      )
+    }
+  }
+
+  private async cycleThinking(): Promise<void> {
+    const llm = this.llm()
+    if (llm === undefined) return
+    const route = this.currentRoute()
+    const info = await llm.resolveModelInfo(route.provider, route.model)
+    const efforts = info.reasoning?.efforts ?? []
+    const next = cycleEffort(efforts, this.currentEffort())
+    if (next !== undefined) await this.cmdThinking(next)
+  }
+
+  private async cmdSkills(): Promise<void> {
+    const skills = await this.listSkills()
+    if (skills.length === 0) {
+      this.pushNotice('no user-invocable skills in this workspace')
+      return
+    }
+    const picked = await pickFromList(this.tui, {
+      title: 'Skills (user-invocable)',
+      body: 'pick one to stage /name in the input; send it to invoke',
+      items: skills.map((skill) => ({
+        value: skill.name,
+        label: skill.name,
+        description: skill.description ?? skill.whenToUse,
+      })),
+    })
+    if (picked !== undefined) {
+      this.editor.setText(`/${picked} `)
+      this.tui.setFocus(this.editor)
+    }
+  }
+
+  private async listSkills(): Promise<readonly SkillSummary[]> {
+    try {
+      const presets = this.ctx.get('agentPresets') as
+        | { serviceFor(agent: unknown, key: string): unknown }
+        | undefined
+      const registry = (presets?.serviceFor(this.agent, 'skills') ??
+        this.ctx.get('skills')) as
+        | { list(options: { cwd?: string; scope?: unknown }): Promise<readonly SkillSummary[]> }
+        | undefined
+      if (registry === undefined) return []
+      const all = await registry.list({ cwd: this.cwd, scope: this.agent })
+      return all.filter((skill) => isUserInvocable(skill))
+    } catch {
+      return []
+    }
+  }
+
+  private cmdHotkeys(): void {
+    this.pushNotice(
+      [
+        'keys:',
+        '  Esc        interrupt · cancel autocomplete',
+        '  Ctrl+C     running→interrupt · text→clear · empty→again exits',
+        '  Ctrl+D     exit when the editor is empty',
+        '  Ctrl+T     toggle thinking display',
+        '  Ctrl+O     toggle full tool output',
+        '  Ctrl+L     model picker · Shift+Tab cycle thinking',
+        '  Tab        complete paths · / slash commands · @ attach files',
+      ].join('\n'),
+    )
+  }
+
+  // ── @ file attachment ─────────────────────────────────────────────────────
+
+  /** Bare `@` at a token start opens the fuzzy file-attachment picker. */
+  private maybeOpenAtPicker(text: string): void {
+    if (this.atPickerOpen || this.tui.hasOverlay()) return
+    const match = /(?:^|[\s(])@\s*$/.exec(text)
+    if (match === null) return
+    this.atPickerOpen = true
+    void this.openAtPicker().finally(() => {
+      this.atPickerOpen = false
+    })
+  }
+
+  private async openAtPicker(): Promise<void> {
+    const files = await this.listWorkspaceFiles()
+    if (files.length === 0) {
+      this.pushNotice('no files found to attach')
+      return
+    }
+    const picked = await pickFromList(this.tui, {
+      title: 'Attach file',
+      items: files.map((file) => ({ value: file, label: file })),
+    })
+    if (picked !== undefined) {
+      const text = this.editor.getText()
+      this.editor.setText(text.replace(/(?:^|[\s(])@\s*$/, ` @${picked} `))
+      this.tui.setFocus(this.editor)
+    }
+  }
+
+  /** Bounded recursive walk over the session cwd through the dsh fs seam. */
+  private async listWorkspaceFiles(): Promise<string[]> {
+    const fs = this.ctx.get('fs') as
+      | {
+          resolve(path: string): Promise<{ displayPath: string }>
+          listDir(
+            target: unknown,
+            signal?: AbortSignal,
+          ): Promise<
+            {
+              name: string
+              type: 'file' | 'directory' | 'other'
+              target: { displayPath: string }
+            }[]
+          >
+        }
+      | undefined
+    if (fs === undefined) return []
+    const results: string[] = []
+    const visited = new Set<string>()
+    const ignored = new Set(['node_modules', '.git', '.dsh'])
+    let root: unknown
+    try {
+      root = await fs.resolve(this.cwd)
+    } catch {
+      return []
+    }
+    const walk = async (target: unknown, depth: number): Promise<void> => {
+      if (depth > 4 || results.length >= 300) return
+      let entries
+      try {
+        entries = await fs.listDir(target)
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        if (results.length >= 300) return
+        if (entry.type === 'file') {
+          const rel = relative(this.cwd, entry.target.displayPath) || entry.name
+          if (!visited.has(rel)) {
+            visited.add(rel)
+            results.push(rel)
+          }
+        } else if (entry.type === 'directory' && !ignored.has(entry.name)) {
+          await walk(entry.target, depth + 1)
+        }
+      }
+    }
+    await walk(root, 0)
+    return results.sort()
+  }
+
+  private async modelCompletions(prefix: string) {
+    const llm = this.llm()
+    if (llm === undefined) return null
+    const routes = await listAllModels(llm)
+    const items = routes
+      .filter((route) => route.model.startsWith(prefix))
+      .map((route) => ({ value: route.model, label: route.model }))
+    return items.length > 0 ? items : null
+  }
+
+  // ── transcript plumbing ───────────────────────────────────────────────────
 
   /** Push a UI-side notice into the transcript. */
   pushNotice(text: string, notice: 'info' | 'error' | 'compact' = 'info'): void {
@@ -173,7 +541,9 @@ export class ChatScreen {
     }
     for (const item of items) {
       const view = this.views.get(item.id)
-      if (view !== undefined) updateView(view, item, this.expandReasoning)
+      if (view !== undefined) {
+        updateView(view, item, this.expandReasoning, this.expandTools)
+      }
     }
 
     // Working loader between messages and the status bar.
@@ -219,8 +589,10 @@ export class ChatScreen {
       // Projections are an optional capability; the folded counters suffice.
     }
 
+    const route = this.currentRoute()
+    const effort = this.currentEffort()
     const status: StatusBarData = {
-      model: this.configModel(),
+      model: effort !== undefined ? `${route.model}·${effort}` : route.model,
       sessionId: String(this.agent.session.id),
       cwd: basename(this.cwd),
       tokens,
@@ -231,15 +603,14 @@ export class ChatScreen {
     this.tui.requestRender()
   }
 
-  private configModel(): string | undefined {
-    // Prefer the agent's resolved options (settings-driven), then the row
-    // config, then the provider route name.
-    return (
-      this.agent.options.model ??
-      this.config.model ??
-      this.agent.options.provider ??
-      this.config.provider
-    )
+  private async openModelPicker(): Promise<void> {
+    const llm = this.llm()
+    if (llm === undefined) {
+      this.pushNotice('llm service unavailable', 'error')
+      return
+    }
+    const picked = await pickModel(this.tui, llm, this.currentRoute())
+    if (picked !== undefined) await this.applyModel(picked)
   }
 }
 

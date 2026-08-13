@@ -17,6 +17,8 @@ export interface ToolCardState {
   argsPreview: string
   status: ToolCardStatus
   resultPreview?: string
+  /** Untruncated result, rendered when the user expands tool output. */
+  resultFull?: string
   errorText?: string
 }
 
@@ -40,6 +42,10 @@ export interface ChatModel {
   title?: string
   /** True between `turn/start` and `turn/end` — drives the working loader. */
   working: boolean
+  /** Reasoning effort the last request actually used (`request/header`). */
+  effort?: string
+  /** Provider/model route the last request actually used. */
+  route?: { provider?: string; model?: string }
 }
 
 const ARGS_PREVIEW_LIMIT = 200
@@ -161,7 +167,22 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
           block !== undefined && block.type === 'tool-result'
             ? textOf(block.content)
             : ''
-        if (result) card.tool.resultPreview = preview(result, RESULT_PREVIEW_LIMIT)
+        if (result) {
+          card.tool.resultPreview = preview(result, RESULT_PREVIEW_LIMIT)
+          card.tool.resultFull = result
+        }
+      }
+      break
+    }
+    case 'request/header': {
+      // The request actually dispatched: read back the resolved route and
+      // reasoning effort (status-bar truth, durable on replay).
+      const config = event.data.header.config as
+        | { provider?: string; model?: string; reasoningEffort?: string }
+        | undefined
+      if (config !== undefined) {
+        model.route = { provider: config.provider, model: config.model }
+        if (config.reasoningEffort !== undefined) model.effort = config.reasoningEffort
       }
       break
     }

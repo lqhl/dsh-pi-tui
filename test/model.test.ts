@@ -189,3 +189,36 @@ test('pushNotice appends a UI-side notice', () => {
   assert.equal(model.items[0].notice, 'info')
   assert.equal(model.items[0].text, 'done')
 })
+
+test('request/header reads back the dispatched route and effort', () => {
+  const model = createModel()
+  applyEvent(
+    model,
+    event('request/header', {
+      header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' } },
+      reason: 'initial',
+    }),
+  )
+  assert.deepEqual(model.route, { provider: 'deepseek-official', model: 'deepseek-v4-pro' })
+  assert.equal(model.effort, 'max')
+})
+
+test('tool results keep the full text for expansion', () => {
+  const model = createModel()
+  const long = 'line one\nline two\nline three'
+  applyEvent(
+    model,
+    event('tool/call', { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{}' }, 1),
+  )
+  applyEvent(
+    model,
+    event('tool/result', {
+      turn: 1,
+      step: 1,
+      message: { role: 'tool', source: { callId: 'c1' }, content: [{ type: 'tool-result', content: [{ type: 'text', text: long }] }] },
+    }, 2),
+  )
+  const card = model.items[0].tool
+  assert.equal(card?.resultFull, long)
+  assert.ok((card?.resultPreview ?? '').length <= long.length)
+})

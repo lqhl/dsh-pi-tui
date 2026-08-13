@@ -63,6 +63,40 @@ class InputPanel extends Container {
   }
 }
 
+export interface ListPickItem {
+  value: string
+  label: string
+  description?: string
+}
+
+/**
+ * Generic single-choice overlay: title + optional body + SelectList.
+ * Resolves the picked value, or undefined when cancelled (Esc).
+ */
+export function pickFromList(
+  tui: TUI,
+  options: {
+    title: string
+    body?: string
+    items: ListPickItem[]
+  },
+): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const list = new SelectList(options.items, Math.min(12, Math.max(2, options.items.length)), selectListTheme)
+    const panel = new ListPanel(options.title, options.body, list)
+    const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
+    list.onSelect = (item) => {
+      handle.hide()
+      resolve(item.value)
+    }
+    list.onCancel = () => {
+      handle.hide()
+      resolve(undefined)
+    }
+    tui.requestRender()
+  })
+}
+
 /**
  * Ask the human to allow or reject one pending approval request.
  * Returns the closed outcome; resolves 'cancelled' when the request's

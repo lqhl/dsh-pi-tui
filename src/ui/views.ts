@@ -112,9 +112,14 @@ export class NoticeView extends Text {
 export class ToolCardView implements Component {
   private item: ChatItem
   private lastRender: string | undefined
+  private expand = false
 
   constructor(item: ChatItem) {
     this.item = item
+  }
+
+  updateFromItem(expand: boolean): void {
+    this.expand = expand
   }
 
   render(width: number): string[] {
@@ -137,11 +142,17 @@ export class ToolCardView implements Component {
     lines.push(`${border} ${truncate(statusLine)}`)
     if (tool.status !== 'running') {
       if (tool.resultPreview !== undefined && tool.resultPreview !== '') {
-        lines.push(`${border} ${truncate(style.toolResult(tool.resultPreview))}`)
+        const body = this.expand && tool.resultFull !== undefined && tool.resultFull !== ''
+          ? tool.resultFull
+          : tool.resultPreview
+        // Full output: keep every line, each truncated to the inner width,
+        // capped at a generous height for very large results.
+        const fullLines = body.split('\n').slice(0, 50)
+        for (const line of fullLines) {
+          lines.push(`${border} ${truncate(style.toolResult(line))}`)
+        }
       }
     }
-    // Pad the border line to full width (the TUI requires exact width lines
-    // only for content; short lines are fine).
     this.lastRender = lines.join('\n')
     return lines
   }
@@ -212,10 +223,15 @@ export function createView(item: ChatItem): Component {
   }
 }
 
-export function updateView(view: Component, item: ChatItem, expandReasoning: boolean): void {
+export function updateView(
+  view: Component,
+  item: ChatItem,
+  expandReasoning: boolean,
+  expandTools: boolean,
+): void {
   if (view instanceof UserMessageView) view.updateFromItem()
   else if (view instanceof AssistantMessageView) view.updateFromItem()
   else if (view instanceof ReasoningView) view.updateFromItem(expandReasoning)
   else if (view instanceof NoticeView) view.updateFromItem()
-  // ToolCardView renders statelessly from its item each frame.
+  else if (view instanceof ToolCardView) view.updateFromItem(expandTools)
 }
