@@ -14,17 +14,18 @@
 | **pi** | `app.clear`：第一次**清空编辑器**、**500ms 内第二次退出**（`interactive-mode.ts:3190-3198`） | `app.exit`：**仅编辑器为空时退出**（`custom-editor.ts:59-67`） | `app.interrupt`=**Esc**：万能取消（中断流式/abort bash/取消补全） |
 | **dsh launcher** | 第一次 SIGINT 优雅排空、第二次强制退出（官方 CLI 语义） | — | — |
 
-### 建议（对齐 pi，兼容 Claude Code 直觉）
+### 建议（对齐 pi 精确语义 + Claude Code 直觉）
 
-1. **Esc** = 中断：turn 运行时调 `agent.cancel({kind:'user'})`（`AgentCancelCause` 已核实），并取消自动补全。`agent.status`（`'idle'|'running'`）判断是否在跑。
-2. **Ctrl+C** 两段式：
-   - turn 运行中 → 中断（同 Esc）；
-   - 空闲且编辑器非空 → 清空编辑器（第一次），提示 `(Ctrl+C again to exit)`；
-   - 编辑器已空（或 500ms 内第二次按）→ 退出（走现有 `disposeRootAndExit`）。
-3. **Ctrl+D** = 编辑器为空时退出（pi 惯例）。
+1. **Esc** = 万能取消（pi 专属中断键）：取消自动补全（编辑器内置）→ turn 运行时 `agent.cancel({kind:'user'})`（`AgentCancelCause` 已核实；`agent.status` `'idle'|'running'` 判断）→ 空闲时双击 Esc 可留待 /tree（M4）。
+2. **Ctrl+C** 两段式（pi 精确语义 + Claude Code 直觉的混合）：
+   - turn 运行中 → 中断（=Esc，Claude Code 习惯）；
+   - 空闲且编辑器非空 → **清空编辑器**（pi 语义，第一次）；
+   - 编辑器已空 → **500ms 内第二次按** → 退出（走现有 `disposeRootAndExit`）；提示 `(Ctrl+C again to exit)`。
+3. **Ctrl+D** = 仅编辑器为空时退出；**非空时回落为删除字符**（pi-tui 编辑器内置 ctrl+d=deleteForward，无需我们实现）。
 4. 退出前保留现有 5s 兜底排空。
+5. 可选（低优先级）：Ctrl+Z 挂起（SIGTSTP）、`/hotkeys` 打印完整键位表（pi 内建）。
 
-实现量：~30 行（`chat.ts` input listener + `model.working`/`agent.status` 判断）。
+实现量：~40 行（`chat.ts` input listener 状态机 + 单测）。
 
 ---
 
@@ -38,7 +39,7 @@
 
 ### dsh 侧正确实现（已核实，比 cc-tui 方案轻）
 
-官方 web 主机（`dsh-host-apiproxy/lib/index.js:1764-1772`）的模式：
+官方 web 主机（`dsh-host-apiproxy/lib/index.js:1764-1772`）与 grok 桥（`acp-server.ts:997-1011`）共同使用：
 
 ```ts
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -48,7 +49,9 @@ installModelSelection(agent.ctx, selection)
 ```
 
 - 模型目录：`ctx.get('llm')` → `listProviders()` + `listModels(provider)`（LlmModelInfo 含 contextWindow）。llm-deepseek 目录：`deepseek-v4-flash` / `deepseek-v4-pro`。
-- 持久化默认：`agentDefaultModel.saveSelection()`（写 settings.yaml，与 web 共享）。
+- ⚠️ **`installModelSelection` 每个 agent 只装一次**（重复安装会让外层陈旧 selection 覆盖）——agent 创建后立即安装并持有 ref。
+- ⚠️ **`AgentOptions` 没有 reasoningEffort 字段**：创建时设不了，effort 只能走 `selection.current.reasoningEffort`（resolveCallConfig 校验 → agent/request waterfall → durable `request/header` 记录）。
+- `agentDefaultModel.saveSelection()` 写的是**进程默认**（settings.yaml），不是会话切换——`/model` 的会话生效靠 selection；是否持久化默认由用户决定。
 
 ### 建议
 
@@ -107,7 +110,8 @@ pi-tui 0.84 编辑器**内置**：
 ### 建议
 
 1. 短期：README 说明"技能由模型自动加载，无需配置"；不加 UI。
-2. 中期：**`/skills`** 命令列出 `isUserInvocable` 的技能（SelectList），选中后注入技能体作为下一步上下文（pi `/skill:name` 等价物）。
+2. 中期：**`/skills`** 命令列出 `isUserInvocable` 的技能（`ctx.skills.list({cwd, scope: agent})` + 过滤，SelectList）。
+3. ⚠️ **重要联动**：dsh 里"用户显式调用技能"= 输入 `/skillname` 文本，由 `dsh-tool-skill` 的 pre-step gesture 边界注入。我们现在的 slash 路由会把**未知命令直接拒绝**——这会吞掉技能调用！修正：输入 `/xxx` 时先查命令表 → 再查用户可调用技能（命中则作为 followup 文本发送）→ 都不中才报"未知命令"。
 
 ---
 
