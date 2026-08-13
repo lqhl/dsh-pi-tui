@@ -26,15 +26,15 @@ test('skips injected (non-user) context', () => {
   applyEvent(
     model,
     event('user/message', {
-      source: { kind: 'plugin', plugin: 'compact' },
-      content: [{ type: 'text', text: 'summary' }],
+      source: { kind: 'goal' },
+      content: [{ type: 'text', text: 'goal snapshot' }],
     }),
   )
   applyEvent(
     model,
     event('user/message', {
-      source: { kind: 'goal' },
-      content: [{ type: 'text', text: 'goal snapshot' }],
+      source: { kind: 'plugin', plugin: 'skill' },
+      content: [{ type: 'text', text: 'skill content' }],
     }),
   )
   assert.equal(model.items.length, 0)
