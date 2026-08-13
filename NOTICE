@@ -1,12 +1,22 @@
 dsh-pi-tui
 ==========
 
-This product adapts UI component logic from the pi coding-agent interactive
-mode (https://github.com/earendil-works/pi, MIT License, Copyright (c) 2025
-Mario Zechner). Adapted portions retain their original copyright; see the
-pi repository LICENSE for details.
+This product renders through `@earendil-works/pi-tui` (MIT License,
+Copyright (c) 2025 Mario Zechner), used as a dependency.
 
-It renders through @earendil-works/pi-tui (MIT, Copyright (c) 2025 Mario
-Zechner), used as a dependency.
+The following implementation patterns were adapted from the pi coding-agent
+interactive mode (https://github.com/earendil-works/pi, MIT License,
+Copyright (c) 2025 Mario Zechner) and retain that copyright:
 
-(File populated with exact adapted-file attribution during M1/M2.)
+- `src/ui/views.ts` — streaming assistant-markdown rendering, collapsed
+  reasoning blocks, and compact tool-execution cards (adapted from
+  `packages/coding-agent/src/modes/interactive/components/assistant-message.ts`
+  and `components/tool-execution.ts`).
+- `src/ui/session-picker.ts` / `src/ui/overlays.ts` — overlay content must be
+  a single input-forwarding component (the `ModelSelectorComponent` pattern
+  from `packages/coding-agent/src/modes/interactive/components/model-selector.ts`).
+- `src/core/model.ts` — the event → render-model fold mirrors the channel
+  state machine of the same interactive mode.
+
+The pi repository's MIT license text is available at
+https://github.com/earendil-works/pi/blob/main/LICENSE.
