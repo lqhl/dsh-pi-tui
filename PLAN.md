@@ -277,3 +277,19 @@ dsh-pi-tui/
 3. **范围**：✅ 同意 M0–M3 验收标准。
 4. **视觉**：✅ 优先复刻 pi coding-agent 观感（改编其 MIT 组件，NOTICE 保留版权）。
 5. **开工**：✅ M0 开始。npm 登录只在 M3 发布时需要，M0–M2 不阻塞。
+
+## 8. 执行状态
+
+| 里程碑 | 状态 |
+|---|---|
+| M0 脚手架 + 冒烟 | ✅ 2026-08-14 |
+| M1 会话闭环 | ✅ 2026-08-14（真实会话回放验证） |
+| M2 交互对等 | ✅ 2026-08-14（slash/审批/提问/投影/notice，16 项单测全绿，PTY 冒烟验证 /plan） |
+| M3 工程化 + 发布 | 🟡 进行中：README/NOTICE/CI 完成；GitHub 仓库 https://github.com/lqhl/dsh-pi-tui 已建并推送 main + v0.1.0；awesome PR #11；**阻塞**：npm publish 需 2FA（用户 Automation token 或自行 OTP 发布）；CI workflow 推送需 gh `workflow` scope |
+| M4 可选增强 | 未开始（图片渲染/多会话/diff 面板/Windows） |
+
+### 关键实现偏离记录
+- `@mariozechner/pi-tui` 已 deprecated → 用 `@earendil-works/pi-tui@0.84.1`（`TUI` 变接口，`TuiMainScreen` 实例化）。
+- 滚动：沿用 pi 原版 UX（终端原生 scrollback），未自建滚动容器。
+- 会话选择器触发：`--resume`（无 id）或裸启动默认新会话（对齐 pi/cc-tui 惯例），未在裸启动时强制弹窗。
+- 持久化：复用 base 的 jsonl（与 web 共享 `~/.dsh/sessions`），未另起 sqlite。
