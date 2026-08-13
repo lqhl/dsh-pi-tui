@@ -4,24 +4,24 @@
  * M0 scope: prove the mount chain — boot a TUI, render a static surface,
  * quit cleanly on Ctrl+C. M1 replaces the static surface with the live
  * chat view (session/event → components) and agent followup submission.
+ *
+ * Lifecycle mirrors cc-tui: apply() returns once the TUI is up; the raw
+ * mode stdin keeps the process alive. Ctrl+C requests the whole tree's
+ * disposal, whose effect cleanup stops the TUI and drains stdin, and the
+ * bounded fallback guarantees the process exits.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import {
   ProcessTerminal,
-  TUI,
+  TuiMainScreen,
   Text,
   TruncatedText,
   matchesKey,
-} from '@mariozechner/pi-tui'
+  type TUI,
+} from '@earendil-works/pi-tui'
 
 /**
- * Apply the TUI app on the plugin context.
- *
- * The returned promise settles only when the TUI is torn down; while it is
- * pending, the cordis fiber stays mounted and the raw-mode stdin keeps the
- * process alive. Quitting requests `ctx.root.fiber.dispose()`, which
- * reaches our dispose listener, stops the TUI, drains stdin, and resolves
- * the promise (mirroring cc-tui's disposeRootAndExit semantics).
+ * Mount the TUI app on the plugin context.
  */
 export async function apply(ctx: Context, _config: unknown): Promise<void> {
   if (!process.stdout.isTTY) {
@@ -31,33 +31,46 @@ export async function apply(ctx: Context, _config: unknown): Promise<void> {
   }
 
   const terminal = new ProcessTerminal()
-  const tui = new TUI(terminal)
+  const tui: TUI = new TuiMainScreen(terminal)
 
   tui.addChild(new Text('hello dsh-pi-tui'))
   tui.addChild(new Text('M0 scaffold — the live chat view lands in M1.'))
   tui.addChild(new TruncatedText('Ctrl+C to quit', 0, 0))
 
-  let stopped = false
-  tui.addInputListener((data) => {
+  tui.addInputListener((data: string) => {
     if (matchesKey(data, 'ctrl+c')) {
-      void ctx.root.fiber.dispose()
+      disposeRootAndExit(ctx, 0)
+      return { consume: true }
     }
+    return undefined
   })
 
-  ctx.on('dispose', () => {
-    if (!stopped) {
-      stopped = true
-      tui.stop()
-    }
+  // If the surrounding tree goes down (reload, teardown), take the TUI
+  // with it: stop the renderer and drain queued stdin so kitty key-release
+  // bytes don't leak to the parent shell.
+  ctx.effect(() => () => {
+    tui.stop()
+    void terminal.drainInput(1000, 50)
   })
 
   tui.start()
+}
 
-  await new Promise<void>((resolve) => {
-    ctx.on('dispose', () => {
-      // Drain queued stdin so kitty key-release bytes don't leak to the
-      // parent shell, then hand the process back to the launcher.
-      void terminal.drainInput(1000, 50).finally(resolve)
-    })
-  })
+/**
+ * Dispose the whole application tree before process exit, with a bounded
+ * fallback (mirrors cc-tui's disposeRootAndExit semantics).
+ */
+function disposeRootAndExit(ctx: Context, code: number): void {
+  const timer = setTimeout(() => process.exit(code), 5000)
+  timer.unref()
+  void ctx.root.fiber.dispose().then(
+    () => {
+      clearTimeout(timer)
+      process.exit(code)
+    },
+    () => {
+      clearTimeout(timer)
+      process.exit(code)
+    },
+  )
 }
