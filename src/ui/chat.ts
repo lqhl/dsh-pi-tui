@@ -91,6 +91,29 @@ export class ChatScreen {
     this.config = options.config
     this.cwd = options.config.cwd ?? process.cwd()
     this.commands = this.ctx.get('commands') as CommandRuntime | undefined
+
+    // Seed the selection so every step has a route, including RESUMED agents
+    // (whose creation never saw our agentOptions): the persisted request
+    // header wins, then the row config, then the harness defaults.
+    const headerConfig = this.agent.session.requestHeader()?.config
+    const seedRoute = {
+      provider:
+        headerConfig?.provider ??
+        this.config.provider ??
+        this.agent.options.provider ??
+        'deepseek-official',
+      model:
+        headerConfig?.model ??
+        this.config.model ??
+        this.agent.options.model ??
+        'deepseek-v4-flash',
+    }
+    this.selection.current = {
+      ...seedRoute,
+      ...(headerConfig?.reasoningEffort !== undefined
+        ? { reasoningEffort: ReasoningEffortId(headerConfig.reasoningEffort) }
+        : {}),
+    }
     installModelSelection(this.agent.ctx, this.selection)
 
     this.tui.addChild(this.messages)
