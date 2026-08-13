@@ -7,10 +7,12 @@
  * disposing the whole tree (bounded fallback, cc-tui semantics).
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { ProcessTerminal, TuiMainScreen, type TUI } from '@earendil-works/pi-tui'
 import { parseArgs, USAGE } from './args.js'
 import { listSessions, resolveAgent } from './core/session.js'
 import { pickSession } from './ui/session-picker.js'
+import { confirmApproval, askQuestions } from './ui/overlays.js'
 import { ChatScreen } from './ui/chat.js'
 
 export interface AppConfig {
@@ -65,7 +67,24 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
 
   const { agent } = await resolveAgent(ctx, sessionId, agentOptions, meta)
 
+  // ── human-interaction seams ────────────────────────────────────────────────
+  // Approval waterfall answerer: answer permission questions for OUR agent
+  // only; every other request continues down the chain.
+  ctx.on('approval/request', (request, next) => {
+    if (request.agent.id !== agent.id) return next()
+    return confirmApproval(tui, request)
+  })
+
+  // ask_user_question provider: the TUI renders the questionnaire itself.
+  const userQuestions = ctx.get('userQuestions') as
+    | { registerProvider(provider: { ask(request: unknown): Promise<unknown> }): () => void }
+    | undefined
+  userQuestions?.registerProvider({
+    ask: (request) => askQuestions(tui, request as Parameters<typeof askQuestions>[1]),
+  })
+
   const screen = new ChatScreen({
+    ctx,
     tui,
     agent,
     config: {

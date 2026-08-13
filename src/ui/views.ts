@@ -86,6 +86,28 @@ export class AssistantMessageView extends Container {
   }
 }
 
+export class NoticeView extends Text {
+  private item: ChatItem
+  private lastKey = ''
+
+  constructor(item: ChatItem) {
+    super('', 1, 0)
+    this.item = item
+  }
+
+  updateFromItem(): void {
+    const flavor = this.item.notice ?? 'info'
+    const marker =
+      flavor === 'error' ? style.toolError('✗') : flavor === 'compact' ? style.accent('»') : style.muted('ℹ')
+    const key = `${flavor}:${this.item.text}`
+    if (key !== this.lastKey) {
+      this.lastKey = key
+      const text = flavor === 'error' ? style.toolError(this.item.text) : style.muted(this.item.text)
+      this.setText(`${marker} ${text}`)
+    }
+  }
+}
+
 /** Compact tool card: status line + truncated args, settle line on result. */
 export class ToolCardView implements Component {
   private item: ChatItem
@@ -138,6 +160,7 @@ export interface StatusBarData {
   sessionId?: string
   cwd?: string
   tokens?: { input: number; output: number }
+  todos?: { done: number; total: number }
   title?: string
 }
 
@@ -156,6 +179,9 @@ export class StatusBar implements Component {
     if (data.cwd !== undefined) parts.push(data.cwd)
     if (data.tokens !== undefined) {
       parts.push(`in ${data.tokens.input} out ${data.tokens.output}`)
+    }
+    if (data.todos !== undefined && data.todos.total > 0) {
+      parts.push(`☐ ${data.todos.done}/${data.todos.total}`)
     }
     if (data.title !== undefined) parts.push(data.title)
     this.text = style.statusBar(parts.join(' · '))
@@ -181,6 +207,8 @@ export function createView(item: ChatItem): Component {
       return new ReasoningView(item)
     case 'tool':
       return new ToolCardView(item)
+    case 'notice':
+      return new NoticeView(item)
   }
 }
 
@@ -188,5 +216,6 @@ export function updateView(view: Component, item: ChatItem, expandReasoning: boo
   if (view instanceof UserMessageView) view.updateFromItem()
   else if (view instanceof AssistantMessageView) view.updateFromItem()
   else if (view instanceof ReasoningView) view.updateFromItem(expandReasoning)
+  else if (view instanceof NoticeView) view.updateFromItem()
   // ToolCardView renders statelessly from its item each frame.
 }

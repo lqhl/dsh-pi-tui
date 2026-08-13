@@ -11,10 +11,13 @@
  * component tree, requesting one diff frame per batch.
  */
 import { basename } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
+  CombinedAutocompleteProvider,
   Container,
   Editor,
   Loader,
@@ -22,11 +25,12 @@ import {
   matchesKey,
   type TUI,
 } from '@earendil-works/pi-tui'
-import { applyEvent, createModel, type ChatModel } from '../core/model.js'
+import { applyEvent, createModel, pushNotice, type ChatModel } from '../core/model.js'
 import { editorTheme, style } from './theme.js'
 import { createView, StatusBar, updateView, type StatusBarData } from './views.js'
 
 export interface ChatScreenOptions {
+  ctx: Context
   tui: TUI
   agent: Agent
   config: {
@@ -38,10 +42,12 @@ export interface ChatScreenOptions {
 }
 
 export class ChatScreen {
+  private readonly ctx: Context
   private readonly tui: TUI
   private readonly agent: Agent
   private readonly config: ChatScreenOptions['config']
   private readonly cwd: string
+  private readonly commands: CommandRuntime | undefined
   private readonly model: ChatModel = createModel()
   private readonly messages = new Container()
   private readonly statusBar = new StatusBar()
@@ -51,16 +57,28 @@ export class ChatScreen {
   private expandReasoning = false
 
   constructor(options: ChatScreenOptions) {
+    this.ctx = options.ctx
     this.tui = options.tui
     this.agent = options.agent
     this.config = options.config
     this.cwd = options.config.cwd ?? process.cwd()
+    this.commands = this.ctx.get('commands') as CommandRuntime | undefined
 
     this.tui.addChild(this.messages)
     this.tui.addChild(this.statusBar)
     this.editor = new Editor(this.tui, editorTheme, { paddingX: 1 })
     this.editor.onSubmit = (text) => {
       this.submit(text)
+    }
+    if (this.commands !== undefined) {
+      // pi-tui's combined provider: slash commands from the live registry
+      // plus file-path completion anchored at the session cwd.
+      const slashCommands = this.commands
+        .list(this.agent)
+        .map((descriptor) => ({ name: descriptor.name, description: descriptor.description }))
+      this.editor.setAutocompleteProvider(
+        new CombinedAutocompleteProvider(slashCommands, this.cwd),
+      )
     }
     this.tui.addChild(this.editor)
     this.tui.setFocus(this.editor)
@@ -85,7 +103,7 @@ export class ChatScreen {
     // second stdin data listener and duplicate every keystroke.
   }
 
-  /** Submit one human turn. */
+  /** Submit one human turn or dispatch a slash command. */
   submit(text: string): void {
     const trimmed = text.trim()
     if (trimmed === '') {
@@ -94,12 +112,48 @@ export class ChatScreen {
     }
     this.editor.addToHistory(trimmed)
     this.editor.setText('')
+    if (trimmed.startsWith('/')) {
+      void this.runCommand(trimmed)
+      return
+    }
     this.agent.followup(
       createUserMessage({
         content: [{ type: 'text', text: trimmed }],
         source: { kind: 'user' },
       }),
     )
+  }
+
+  /** Execute one slash command through the official registry and render it. */
+  private async runCommand(line: string): Promise<void> {
+    if (this.commands === undefined) {
+      this.pushNotice('no command registry mounted', 'error')
+      return
+    }
+    try {
+      const execution = await this.commands.execute(this.agent, line, new AbortController().signal)
+      if (execution === undefined) {
+        this.pushNotice(`unknown command: ${line}`, 'error')
+        return
+      }
+      const result = execution.result
+      if (result.kind === 'success') {
+        this.pushNotice(result.text ?? line)
+      } else {
+        this.pushNotice(result.text, 'error')
+      }
+    } catch (error) {
+      this.pushNotice(
+        `command failed: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      )
+    }
+  }
+
+  /** Push a UI-side notice into the transcript. */
+  pushNotice(text: string, notice: 'info' | 'error' | 'compact' = 'info'): void {
+    pushNotice(this.model, text, notice)
+    this.sync()
   }
 
   /** Fold one session event and reconcile the component tree. */
@@ -139,11 +193,38 @@ export class ChatScreen {
       this.workingLoader = undefined
     }
 
+    // Session projections (todo list, token meter) are the authoritative
+    // UI read models; fall back to the locally folded counters.
+    let tokens = this.model.tokens
+    let todos: { done: number; total: number } | undefined
+    try {
+      const projections = this.ctx.get('sessionProjections') as
+        | { snapshot(session: unknown): { values: Record<string, unknown> } }
+        | undefined
+      const values = projections?.snapshot(this.agent.session).values
+      const usage = values?.tokenUsage as
+        | { totals?: { uncachedInputTokens: number; outputTokens: number } }
+        | undefined
+      if (usage?.totals !== undefined) {
+        tokens = { input: usage.totals.uncachedInputTokens, output: usage.totals.outputTokens }
+      }
+      const todoList = values?.todos as { status: string }[] | null | undefined
+      if (Array.isArray(todoList)) {
+        todos = {
+          done: todoList.filter((entry) => entry.status === 'completed').length,
+          total: todoList.length,
+        }
+      }
+    } catch {
+      // Projections are an optional capability; the folded counters suffice.
+    }
+
     const status: StatusBarData = {
       model: this.configModel(),
       sessionId: String(this.agent.session.id),
       cwd: basename(this.cwd),
-      tokens: this.model.tokens,
+      tokens,
+      todos,
       title: this.model.title,
     }
     this.statusBar.update(status)

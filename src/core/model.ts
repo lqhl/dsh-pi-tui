@@ -22,12 +22,14 @@ export interface ToolCardState {
 
 export interface ChatItem {
   readonly id: number
-  kind: 'user' | 'assistant' | 'reasoning' | 'tool'
+  kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'notice'
   text: string
   /** True while deltas still stream in; sealed items render their final form. */
   streaming: boolean
   seq?: number
   tool?: ToolCardState
+  /** Notice flavor: info (slash results), error, or compact checkpoint. */
+  notice?: 'info' | 'error' | 'compact'
 }
 
 export interface ChatModel {
@@ -76,8 +78,20 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
 
   switch (event.type) {
     case 'user/message': {
-      // Only direct human prompts render as bubbles; injected context
-      // (plugin/goal/compact sources) is skipped for now (M2: notices).
+      // Compaction checkpoint: render as a framed notice, not a bubble.
+      if (
+        event.data.source.kind === 'plugin' &&
+        event.data.source.plugin === 'compact'
+      ) {
+        push({ kind: 'notice', text: 'Conversation compacted', streaming: false, seq: event.seq, notice: 'compact' })
+        const summary = textOf(event.data.content)
+        if (summary) {
+          push({ kind: 'notice', text: summary, streaming: false, seq: event.seq, notice: 'compact' })
+        }
+        break
+      }
+      // Only direct human prompts render as bubbles; other injected context
+      // (goal/skill sources) is skipped.
       if (event.data.source.kind !== 'user') break
       const text = textOf(event.data.content)
       if (text) {
@@ -161,6 +175,16 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       for (const item of model.items) {
         if (item.kind === 'reasoning') item.streaming = false
       }
+      // Surface non-completed endings as notices.
+      const reason = event.data.reason
+      if (reason.kind === 'error') {
+        const failure = (reason as { error: { code?: string; message?: string } }).error
+        push({ kind: 'notice', text: `turn failed: ${failure?.code ?? 'ERROR'}${failure?.message ? ` — ${failure.message}` : ''}`, streaming: false, seq: event.seq, notice: 'error' })
+      } else if (reason.kind === 'aborted') {
+        push({ kind: 'notice', text: 'turn aborted', streaming: false, seq: event.seq, notice: 'info' })
+      } else if (reason.kind === 'max-tokens') {
+        push({ kind: 'notice', text: 'turn hit the output-token ceiling', streaming: false, seq: event.seq, notice: 'info' })
+      }
       break
     }
     default:
@@ -190,4 +214,19 @@ function sealReasoning(model: ChatModel, _seq?: number): void {
     .filter((entry) => entry.kind === 'reasoning' && entry.streaming)
     .at(-1)
   if (item !== undefined) item.streaming = false
+}
+
+/** Push a UI-side notice (slash-command results, errors) into the transcript. */
+export function pushNotice(
+  model: ChatModel,
+  text: string,
+  notice: NonNullable<ChatItem['notice']> = 'info',
+): void {
+  model.items.push({
+    id: model.items.length,
+    kind: 'notice',
+    text,
+    streaming: false,
+    notice,
+  })
 }

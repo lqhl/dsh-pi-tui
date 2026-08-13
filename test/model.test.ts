@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { applyEvent, createModel, textOf } from '../src/core/model.js'
+import { applyEvent, createModel, pushNotice, textOf } from '../src/core/model.js'
 
 function event(type: string, data: unknown, seq = 0): SessionEvent {
   return { seq, time: Date.now(), type, data } as unknown as SessionEvent
@@ -142,4 +142,50 @@ test('textOf joins text blocks only', () => {
   )
   assert.equal(textOf([]), '')
   assert.equal(textOf(undefined), '')
+})
+
+test('compact checkpoints render as notices, not bubbles', () => {
+  const model = createModel()
+  applyEvent(
+    model,
+    event('user/message', {
+      source: { kind: 'plugin', plugin: 'compact' },
+      content: [{ type: 'text', text: 'earlier conversation summarized' }],
+    }),
+  )
+  assert.equal(model.items.length, 2)
+  assert.equal(model.items[0].kind, 'notice')
+  assert.equal(model.items[0].notice, 'compact')
+  assert.equal(model.items[0].text, 'Conversation compacted')
+  assert.equal(model.items[1].kind, 'notice')
+  assert.equal(model.items[1].text, 'earlier conversation summarized')
+})
+
+test('failed turns produce error notices', () => {
+  const model = createModel()
+  applyEvent(model, event('turn/start', { turn: 1 }, 1))
+  applyEvent(
+    model,
+    event('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'UNAUTHORIZED', message: 'bad key' } } }, 2),
+  )
+  const notice = model.items.find((item) => item.kind === 'notice')
+  assert.ok(notice !== undefined)
+  assert.equal(notice.notice, 'error')
+  assert.ok(notice.text.includes('UNAUTHORIZED'))
+  assert.ok(notice.text.includes('bad key'))
+
+  // Completed turns stay silent.
+  const quiet = createModel()
+  applyEvent(quiet, event('turn/start', { turn: 1 }, 1))
+  applyEvent(quiet, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 2))
+  assert.equal(quiet.items.length, 0)
+})
+
+test('pushNotice appends a UI-side notice', () => {
+  const model = createModel()
+  pushNotice(model, 'done', 'info')
+  assert.equal(model.items.length, 1)
+  assert.equal(model.items[0].kind, 'notice')
+  assert.equal(model.items[0].notice, 'info')
+  assert.equal(model.items[0].text, 'done')
 })
