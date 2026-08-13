@@ -20,9 +20,27 @@ dsh --profile pi-tui --resume                 # 从持久化会话列表中选�
 | 按键 | 功能 |
 |---|---|
 | `Enter` | 提交（`Shift+Enter` 换行） |
+| `Esc` | 中断当前 turn / 取消自动补全 |
+| `Ctrl+C` | 运行中→中断；有文字→清空；已空→再次按下退出 |
+| `Ctrl+D` | 编辑器为空时退出（非空时删除字符） |
+| `Ctrl+T` | 展开/折叠 thinking 块 |
+| `Ctrl+O` | 展开/折叠工具完整输出 |
+| `Ctrl+L` | 打开模型选择器 |
+| `Shift+Tab` | 循环思考强度（off→high→max） |
 | `Tab` | 自动补全（文件路径 / slash 命令） |
-| `Ctrl+O` | 展开/折叠 thinking 块 |
-| `Ctrl+C` | 退出 |
+| `@` | 文件提及菜单（fuzzy 选择后插入相对路径） |
+
+## 命令
+
+| 命令 | 功能 |
+|---|---|
+| `/model [query]` | 切换模型（无参数弹选择器；下一步生效） |
+| `/thinking off\|high\|max` | 设置思考强度（下一步生效） |
+| `/skills` | 列出人类可调用技能 |
+| `/hotkeys` | 显示键位表 |
+| `/compact` `/goal` `/plan` `/feedback` | 官方 dsh 命令（自动发现） |
+
+模型/思考强度切换通过官方 `installModelSelection` 链路（与 web/grok 客户端同款），无需 fork 会话；会话与 web profile 共享 `~/.dsh/sessions` 持久化存储。
 
 ## 功能
 
