@@ -18,7 +18,7 @@ dsh --profile pi-tui
 | Milestone | State |
 |---|---|
 | M0 scaffold + boot smoke | ✅ done (2026-08-14) |
-| M1 chat loop (streaming, tool cards, --resume) | planned |
+| M1 chat loop (streaming, tool cards, --resume) | ✅ done (2026-08-14) |
 | M2 parity (slash commands, approval, questions, status bar) | planned |
 | M3 engineering + publish | planned |
 

@@ -1,48 +1,93 @@
 /**
- * dsh-pi-tui app: the pi-tui rendering loop over dsh services.
+ * dsh-pi-tui app: boot the pi-tui rendering loop over dsh services.
  *
- * M0 scope: prove the mount chain — boot a TUI, render a static surface,
- * quit cleanly on Ctrl+C. M1 replaces the static surface with the live
- * chat view (session/event → components) and agent followup submission.
- *
- * Lifecycle mirrors cc-tui: apply() returns once the TUI is up; the raw
- * mode stdin keeps the process alive. Ctrl+C requests the whole tree's
- * disposal, whose effect cleanup stops the TUI and drains stdin, and the
- * bounded fallback guarantees the process exits.
+ * Flow: parse app args → resolve or create the agent (session picker when
+ * `--resume` has no id) → mount the ChatScreen → replay the durable
+ * session log → subscribe to live `session/event` → quit on Ctrl+C by
+ * disposing the whole tree (bounded fallback, cc-tui semantics).
  */
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  ProcessTerminal,
-  TuiMainScreen,
-  Text,
-  TruncatedText,
-  matchesKey,
-  type TUI,
-} from '@earendil-works/pi-tui'
+import { ProcessTerminal, TuiMainScreen, type TUI } from '@earendil-works/pi-tui'
+import { parseArgs, USAGE } from './args.js'
+import { listSessions, resolveAgent } from './core/session.js'
+import { pickSession } from './ui/session-picker.js'
+import { ChatScreen } from './ui/chat.js'
+
+export interface AppConfig {
+  sessionId?: string
+  provider?: string
+  model?: string
+  cwd?: string
+}
 
 /**
  * Mount the TUI app on the plugin context.
  */
-export async function apply(ctx: Context, _config: unknown): Promise<void> {
+export async function apply(ctx: Context, config: AppConfig): Promise<void> {
+  if (process.env.PI_TUI_DEBUG !== undefined) {
+    console.error('[pi-tui debug] config =', JSON.stringify(config))
+  }
+  const cmdline = ctx.get('cmdlineArgs') as { get(): readonly string[] } | undefined
+  const args = parseArgs(cmdline?.get() ?? [])
+
+  // YAML scalars like `undefined` arrive as the string "undefined"; treat
+  // them (and empty strings) as absent.
+  const clean = (value: string | undefined): string | undefined =>
+    value === undefined || value === 'undefined' || value === '' ? undefined : value
+  const sessionConfig = clean(config.sessionId)
+  const provider = clean(config.provider)
+  const model = clean(config.model)
+  if (args.help) {
+    console.log(USAGE)
+    disposeRootAndExit(ctx, 0)
+    return
+  }
+  if (args.unknown.length > 0) {
+    throw new Error(`pi-tui: unknown arguments: ${args.unknown.join(' ')} (see --help)`)
+  }
   if (!process.stdout.isTTY) {
-    throw new Error(
-      'dsh-pi-tui needs an interactive terminal (stdout is not a TTY)',
-    )
+    throw new Error('dsh-pi-tui needs an interactive terminal (stdout is not a TTY)')
   }
 
   const terminal = new ProcessTerminal()
   const tui: TUI = new TuiMainScreen(terminal)
+  tui.start()
 
-  tui.addChild(new Text('hello dsh-pi-tui'))
-  tui.addChild(new Text('M0 scaffold — the live chat view lands in M1.'))
-  tui.addChild(new TruncatedText('Ctrl+C to quit', 0, 0))
+  const agentOptions = { provider, model }
+  const meta = { cwd: config.cwd ?? process.cwd() }
 
-  tui.addInputListener((data: string) => {
-    if (matchesKey(data, 'ctrl+c')) {
+  // Session picker when `--resume` is given without an id.
+  let sessionId = args.resumeId ?? sessionConfig
+  if (sessionId === undefined && args.pickSession) {
+    const headers = await listSessions(ctx)
+    sessionId = await pickSession(tui, headers)
+  }
+
+  const { agent } = await resolveAgent(ctx, sessionId, agentOptions, meta)
+
+  const screen = new ChatScreen({
+    tui,
+    agent,
+    config: {
+      provider,
+      model,
+      cwd: config.cwd,
+    },
+    onQuit: () => {
       disposeRootAndExit(ctx, 0)
-      return { consume: true }
+    },
+  })
+
+  // Replay the durable log first so the transcript paints on the first
+  // frame; only then subscribe, so no event is folded twice.
+  for (const event of agent.session.events) {
+    screen.handleEvent(event)
+  }
+
+  ctx.on('session/event', (session, event) => {
+    if (session.id === agent.id) {
+      screen.handleEvent(event)
     }
-    return undefined
   })
 
   // If the surrounding tree goes down (reload, teardown), take the TUI
@@ -52,8 +97,6 @@ export async function apply(ctx: Context, _config: unknown): Promise<void> {
     tui.stop()
     void terminal.drainInput(1000, 50)
   })
-
-  tui.start()
 }
 
 /**

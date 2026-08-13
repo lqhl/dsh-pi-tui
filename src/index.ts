@@ -10,7 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 
 export const name = 'pi-tui'
-export const inject = ['cmdlineArgs']
+export const inject = ['agents', 'cmdlineArgs']
 
 /** dsh-pi-tui plugin configuration (row config in cordis.patch.yml). */
 export interface Config {

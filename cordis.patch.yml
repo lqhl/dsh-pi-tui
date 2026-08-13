@@ -28,5 +28,5 @@
       name: 'dsh-pi-tui'
       config:
         provider: deepseek-official
-        model: undefined
-        sessionId: undefined
+        # model/sessionId absent = undefined; `--resume` reaches the app
+        # through ctx.cmdlineArgs instead.
