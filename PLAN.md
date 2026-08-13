@@ -285,7 +285,8 @@ dsh-pi-tui/
 | M0 脚手架 + 冒烟 | ✅ 2026-08-14 |
 | M1 会话闭环 | ✅ 2026-08-14（真实会话回放验证） |
 | M2 交互对等 | ✅ 2026-08-14（slash/审批/提问/投影/notice，16 项单测全绿，PTY 冒烟验证 /plan） |
-| M3 工程化 + 发布 | 🟡 进行中：README/NOTICE/CI 完成；GitHub 仓库 https://github.com/lqhl/dsh-pi-tui 已建并推送 main + v0.1.0；awesome PR #11；**阻塞**：npm publish 需 2FA（用户 Automation token 或自行 OTP 发布）；CI workflow 推送需 gh `workflow` scope |
+| M3 工程化 + 发布 | 🟡 GitHub ✅（main/v0.1.0/CI workflow 已推送，workflow scope 已授权）；awesome PR #11 ✅；npm publish ⏸ 用户暂停（试用反馈 bug 优先，待修复验证后由用户决定发布，token 需 Automation 类型） |
+| UX 增强（用户反馈） | ✅ 2026-08-14：Ctrl+C 两段式/Ctrl+D/Esc 中断、/model+/thinking（installModelSelection 链路）、@ 文件菜单、/skills、Ctrl+T/Ctrl+O 键位迁移、request/header 状态栏回读、resume 路由修复——23 项单测 + 全部 PTY 冒烟通过 |
 | M4 可选增强 | 未开始（图片渲染/多会话/diff 面板/Windows） |
 
 ### 关键实现偏离记录
