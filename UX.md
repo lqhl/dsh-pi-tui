@@ -55,11 +55,12 @@ installModelSelection(agent.ctx, selection)
 
 ### 建议
 
-1. **UI 级 `/model [query]`**（不注册进官方命令表，走 cc-tui LOCAL_COMMANDS 思路）：fuzzy SelectList overlay，数据来自 `llm.listModels`；带 query 时直接切换，无 query 时弹选择器。
-2. 应用：`selection.current = {provider, model, reasoningEffort: 当前值}` —— 轻量、**下一步生效**、不 fork 会话（优于 cc-tui）。
-3. **`Ctrl+L`** 打开选择器（pi 惯例）；可选 `Ctrl+P`/`Shift+Ctrl+P` 循环（低优先级）。
-4. 选择后同步 `agentDefaultModel.saveSelection()`（可选，全局持久化）。
-5. 状态栏即时显示新模型；运行中切换 → 提示"下一步生效"。
+1. **UI 级 `/model [query]`**（不注册进官方命令表）：fuzzy SelectList overlay，数据来自 `llm.listProviders()` × `listModels()` 展平（同 id 多 provider 用 `provider@model` 区分）；带 query 直接切换，无 query 弹选择器。
+2. **选中校验**：`await llm.resolveCallConfig({provider, model})`（grok `session/set_model` 同款，非法值在 I/O 前失败）。
+3. **应用**（grok 模式，权威参考 `acp-server.ts:969-1042`）：agent 绑定后 `installModelSelection(agent.ctx, ref)` **只装一次**；选中后 `ref.current = {provider, model}`。
+4. **可选持久化**：`agentDefaultModel.saveSelection()` —— grok 注释给出的理由：写共享默认可**避免 web 侧外层 waterfall 的陈旧 selection 覆盖**（web 进程的 selection 回退链会读它）。
+5. **`Ctrl+L`** 打开选择器（pi 惯例；grok 官方是 Ctrl+M）；可选 Ctrl+P/N 循环（低优先级）。
+6. 状态栏即时显示新模型；运行中切换 → 提示"下一步生效"。
 
 ---
 
@@ -92,10 +93,12 @@ pi-tui 0.84 编辑器**内置**：
 
 ### 建议
 
-1. **UI 级 `/thinking off|high|max`**：改 `selection.current.reasoningEffort`（下一步生效），状态栏显示当前档位。
-2. **`Shift+Tab`** 循环切换（pi 惯例）。
-3. **`Ctrl+T`** = thinking 显示折叠（pi 惯例；把我们现在误用的 `Ctrl+O` 换掉，见下）。
-4. 与 /model 合并展示（每行模型附 effort 档位）可选。
+1. **UI 级 `/thinking off|high|max`**：改 `selection.current.reasoningEffort`（下一步生效）。**档位动态枚举**：`(await llm.resolveModelInfo(provider, model)).reasoning?.efforts`（deepseek 固定 off/high/max 有序表 + defaultEffort），不硬编码。
+2. **校验**：`await llm.resolveCallConfig({provider, model, reasoningEffort})`——非法值抛 `UNSUPPORTED_REASONING_EFFORT`（I/O 前）。
+3. **`Shift+Tab`** 循环切换（pi 惯例）。
+4. **`Ctrl+T`** = thinking 显示折叠（pi 惯例；把我们现在误用的 `Ctrl+O` 换掉，见下）。
+5. **状态栏回读实际值**：订阅 `request/header` 事件（`event.data.header.config?.reasoningEffort`），显示模型请求真正用的档位（cc-tui 同款）。
+6. 与 /model 合并展示（每行模型附 effort 档位）可选。
 
 ---
 
@@ -110,8 +113,9 @@ pi-tui 0.84 编辑器**内置**：
 ### 建议
 
 1. 短期：README 说明"技能由模型自动加载，无需配置"；不加 UI。
-2. 中期：**`/skills`** 命令列出 `isUserInvocable` 的技能（`ctx.skills.list({cwd, scope: agent})` + 过滤，SelectList）。
+2. 中期：**`/skills`** 命令列出 `isUserInvocable` 的技能（SelectList）：注册表**从 preset 作用域取**（agent 属于某 preset 时用 `agentPresets.serviceFor(agent, 'skills')`，否则 host `ctx.get('skills')`——web `skill.list` RPC 同款）；`modelInvocable:false` 的标 user-only。
 3. ⚠️ **重要联动**：dsh 里"用户显式调用技能"= 输入 `/skillname` 文本，由 `dsh-tool-skill` 的 pre-step gesture 边界注入。我们现在的 slash 路由会把**未知命令直接拒绝**——这会吞掉技能调用！修正：输入 `/xxx` 时先查命令表 → 再查用户可调用技能（命中则作为 followup 文本发送）→ 都不中才报"未知命令"。
+4. 可选直接注入：`ctx.skills.get(name, {cwd, scope})` + `renderSkillContent(skill)` 作为指令上下文（绕开 gesture 边界）。
 
 ---
 
