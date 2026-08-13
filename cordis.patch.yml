@@ -1,0 +1,32 @@
+# dsh-pi-tui bundle patch: the pi-tui interactive terminal front door over
+# the dsh-base layer. Applied after dsh-base's insert; rows override base
+# rows by id, with the profile's own cordis.patch.yml and any --patch
+# overlays still to come.
+#
+# A patch replaces the targeted row's whole `config`, so an overriding row
+# restates every key it owns. All other dsh-base rows — tools, sandbox and
+# approval policy, skills, goal, plan mode, persistence, telemetry — are
+# inherited unchanged, so sessions live in the shared ~/.dsh/sessions store
+# alongside the web profile.
+
+# ── surface-specific values over the dsh-base layer ─────────────────────────
+
+# The TUI creates (or resumes) its agent at runtime through the agent
+# factory; no declarative agents are started at boot.
+- id: agent-loop
+  config:
+    agents: []
+
+# ── dsh-pi-tui rows ─────────────────────────────────────────────────────────
+
+- insert:
+    # The interactive front door. The plugin creates/resumes its agent at
+    # runtime and disposes the whole app tree (exiting the process) when
+    # the TUI unmounts. `dsh --profile pi-tui --resume <session-id>`
+    # reaches the plugin through ctx.cmdlineArgs.
+    - id: pi-tui
+      name: 'dsh-pi-tui'
+      config:
+        provider: deepseek-official
+        model: undefined
+        sessionId: undefined

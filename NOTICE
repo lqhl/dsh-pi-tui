@@ -1,0 +1,12 @@
+dsh-pi-tui
+==========
+
+This product adapts UI component logic from the pi coding-agent interactive
+mode (https://github.com/earendil-works/pi, MIT License, Copyright (c) 2025
+Mario Zechner). Adapted portions retain their original copyright; see the
+pi repository LICENSE for details.
+
+It renders through @mariozechner/pi-tui (MIT, Copyright (c) 2025 Mario
+Zechner), used as a dependency.
+
+(File populated with exact adapted-file attribution during M1/M2.)
