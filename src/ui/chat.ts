@@ -80,7 +80,9 @@ export class ChatScreen {
 
     this.tui.terminal.setTitle(`dsh-pi-tui · ${basename(this.cwd)}`)
     this.sync()
-    this.tui.start()
+    // NOTE: the app layer already started the TUI (it must be live for the
+    // boot-time session picker overlay); starting again would attach a
+    // second stdin data listener and duplicate every keystroke.
   }
 
   /** Submit one human turn. */
