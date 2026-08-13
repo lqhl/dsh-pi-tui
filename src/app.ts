@@ -39,6 +39,15 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   const sessionConfig = clean(config.sessionId)
   const provider = clean(config.provider)
   const model = clean(config.model)
+
+  // Provider/model route: explicit row config wins; otherwise inherit the
+  // harness's default-model selection (settings.yaml), matching the web app.
+  const agentDefaultModel = ctx.get('agentDefaultModel') as
+    | { currentSelection(): { provider: string; model: string; reasoningEffort?: string } }
+    | undefined
+  const defaultSelection = agentDefaultModel?.currentSelection()
+  const effectiveProvider = provider ?? defaultSelection?.provider
+  const effectiveModel = model ?? defaultSelection?.model
   if (args.help) {
     console.log(USAGE)
     disposeRootAndExit(ctx, 0)
@@ -55,7 +64,7 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   const tui: TUI = new TuiMainScreen(terminal)
   tui.start()
 
-  const agentOptions = { provider, model }
+  const agentOptions = { provider: effectiveProvider, model: effectiveModel }
   const meta = { cwd: config.cwd ?? process.cwd() }
 
   // Session picker when `--resume` is given without an id.
@@ -88,8 +97,8 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
     tui,
     agent,
     config: {
-      provider,
-      model,
+      provider: effectiveProvider,
+      model: effectiveModel,
       cwd: config.cwd,
     },
     onQuit: () => {

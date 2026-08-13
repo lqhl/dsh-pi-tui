@@ -232,9 +232,14 @@ export class ChatScreen {
   }
 
   private configModel(): string | undefined {
-    // The concrete model is adapter-resolved at request time; show the
-    // explicit override when set, else the provider route.
-    return this.config.model ?? this.config.provider
+    // Prefer the agent's resolved options (settings-driven), then the row
+    // config, then the provider route name.
+    return (
+      this.agent.options.model ??
+      this.config.model ??
+      this.agent.options.provider ??
+      this.config.provider
+    )
   }
 }
 
