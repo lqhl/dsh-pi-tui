@@ -27,8 +27,9 @@ dsh --profile pi-tui --resume                 # 从持久化会话列表中选�
 | `Ctrl+O` | 展开/折叠工具完整输出 |
 | `Ctrl+L` | 打开模型选择器 |
 | `Shift+Tab` | 循环思考强度（off→high→max） |
-| `Tab` | 自动补全（文件路径 / slash 命令） |
-| `@` | 文件提及菜单（fuzzy 选择后插入相对路径） |
+| `Tab` | 补全（slash 命令 / 路径型 token；普通单词不触发） |
+| `@` | 文件提及菜单（搜索框 fuzzy 过滤，选中即插入） |
+| `!` / `!!` | 直接执行 shell 命令（用户全权；`!!` 输出不进模型上下文） |
 
 ## 命令
 
@@ -38,6 +39,7 @@ dsh --profile pi-tui --resume                 # 从持久化会话列表中选�
 | `/thinking off\|high\|max` | 设置思考强度（下一步生效） |
 | `/skills` | 列出人类可调用技能 |
 | `/hotkeys` | 显示键位表 |
+| `!cmd` / `!!cmd` | 直接执行 shell 命令（用户全权，Esc 中止；`!!` 输出不进模型上下文） |
 | `/compact` `/goal` `/plan` `/feedback` | 官方 dsh 命令（自动发现） |
 
 模型/思考强度切换通过官方 `installModelSelection` 链路（与 web/grok 客户端同款），无需 fork 会话；会话与 web profile 共享 `~/.dsh/sessions` 持久化存储。
