@@ -624,7 +624,19 @@ export class ChatScreen {
     if (fs === undefined) return []
     const results: string[] = []
     const visited = new Set<string>()
-    const ignored = new Set(['node_modules', '.git', '.dsh'])
+    // Build artifacts and VCS metadata never belong in an attach list.
+    const ignored = new Set([
+      'node_modules',
+      '.git',
+      '.dsh',
+      'lib',
+      'dist',
+      'build',
+      'coverage',
+      '.turbo',
+      '.next',
+      '.cache',
+    ])
     let root: unknown
     try {
       root = await fs.resolve(this.cwd)

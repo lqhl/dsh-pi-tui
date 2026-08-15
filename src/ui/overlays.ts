@@ -123,14 +123,17 @@ export function pickFromListWithSearch(
     const list = new SelectList(options.items, Math.min(12, Math.max(2, options.items.length)), selectListTheme)
     const panel = new SearchPanel(options.title, options.body, search, list, options.items)
     const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
-    list.onSelect = (item) => {
+    const onSelect = (item: { value: string; label: string; description?: string }): void => {
+      if (item.value === '__nomatch__') return // placeholder is not a pick
       handle.hide()
       resolve(item.value)
     }
-    list.onCancel = () => {
+    const onCancel = (): void => {
       handle.hide()
       resolve(undefined)
     }
+    list.onSelect = onSelect
+    list.onCancel = onCancel
     tui.requestRender()
   })
 }
@@ -183,13 +186,29 @@ class SearchPanel extends Container {
 
   private refilter(): void {
     const query = this.search.getValue().trim()
-    const filtered =
-      query === ''
-        ? this.allItems
-        : fuzzyFilter(this.allItems, query, (item) => item.label)
+    let filtered: ListPickItem[]
+    if (query === '') {
+      filtered = this.allItems
+    } else {
+      // Two tiers, mirroring pi's filename-weighted fd scoring: basename
+      // matches first (the user types filenames, not paths), then full-path
+      // matches appended only when the basename tier is thin.
+      const byBasename = fuzzyFilter(this.allItems, query, (item) =>
+        item.label.split('/').at(-1) ?? item.label,
+      )
+      if (byBasename.length >= 8) {
+        filtered = byBasename
+      } else {
+        const rest = this.allItems.filter((item) => !byBasename.includes(item))
+        filtered = [...byBasename, ...fuzzyFilter(rest, query, (item) => item.label)]
+      }
+    }
     if (filtered.length === 0) {
-      // Keep the list mounted with a hint instead of an empty select list.
-      filtered.push({ value: '', label: 'no matches', description: 'keep typing or Esc' })
+      // A selectable-looking placeholder would let Enter "pick" an empty
+      // value; use a sentinel the caller ignores.
+      filtered = [
+        { value: '__nomatch__', label: 'no matches', description: 'keep typing or Esc' },
+      ]
     }
     const rebuilt = new SelectList(filtered, Math.min(12, Math.max(2, filtered.length)), selectListTheme)
     rebuilt.onSelect = this.list.onSelect
