@@ -242,12 +242,14 @@ export function pushNotice(
   model: ChatModel,
   text: string,
   notice: NonNullable<ChatItem['notice']> = 'info',
-): void {
-  model.items.push({
+): ChatItem {
+  const item: ChatItem = {
     id: model.items.length,
     kind: 'notice',
     text,
     streaming: false,
     notice,
-  })
+  }
+  model.items.push(item)
+  return item
 }

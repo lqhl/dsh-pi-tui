@@ -35,15 +35,23 @@ import {
   TuiMainScreen,
   isKeyRelease,
   matchesKey,
+  type AutocompleteProvider,
   type SlashCommand,
   type TUI,
 } from '@earendil-works/pi-tui'
-import { applyEvent, createModel, pushNotice, type ChatModel } from '../core/model.js'
-import { ctrlC, cycleEffort, parseSlash, type ExitArm } from '../core/keys.js'
+import { applyEvent, createModel, pushNotice, type ChatItem, type ChatModel } from '../core/model.js'
+import {
+  ctrlC,
+  cycleEffort,
+  isPathLikeToken,
+  parseBang,
+  parseSlash,
+  type ExitArm,
+} from '../core/keys.js'
 import { editorTheme, style } from './theme.js'
 import { createView, StatusBar, updateView, type StatusBarData } from './views.js'
 import { listAllModels, pickModel, type LlmRuntimeLike, type ModelRoute } from './model-picker.js'
-import { pickFromList } from './overlays.js'
+import { pickFromList, pickFromListWithSearch } from './overlays.js'
 
 export interface ChatScreenOptions {
   ctx: Context
@@ -138,7 +146,26 @@ export class ChatScreen {
       { name: 'skills', description: 'List user-invocable skills' },
       { name: 'hotkeys', description: 'Show key bindings' },
     ]
-    this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(slashCommands, this.cwd))
+    this.editor.setAutocompleteProvider(
+      new PathAwareAutocomplete(
+        new CombinedAutocompleteProvider(slashCommands, this.cwd),
+      ),
+    )
+    // Rebuild the provider once the skill catalog arrives so `/` completes
+    // user-invocable skills too (plain `/name` — the dsh pre-step gesture
+    // recognizes that token, not pi's `/skill:name` form).
+    void this.listSkills().then((skills) => {
+      const withSkills: SlashCommand[] = [
+        ...slashCommands,
+        ...skills.map((skill) => ({
+          name: skill.name,
+          description: skill.description ?? skill.whenToUse ?? 'skill',
+        })),
+      ]
+      this.editor.setAutocompleteProvider(
+        new PathAwareAutocomplete(new CombinedAutocompleteProvider(withSkills, this.cwd)),
+      )
+    })
     this.tui.addChild(this.editor)
     this.tui.setFocus(this.editor)
 
@@ -148,6 +175,11 @@ export class ChatScreen {
       // functional key (Ctrl+C/D/T/O/L, Esc, Shift+Tab) fires twice.
       if (isKeyRelease(data)) return undefined
       if (matchesKey(data, 'escape')) {
+        // A running human shell command owns Esc first (pi semantics).
+        if (this.bashRunning) {
+          this.bashAbort?.abort()
+          return { consume: true }
+        }
         if (this.isWorking()) {
           this.interrupt()
           return { consume: true }
@@ -211,7 +243,7 @@ export class ChatScreen {
     this.agent.cancel({ kind: 'user' }, { keepInbox: true })
   }
 
-  /** Submit one human turn or dispatch a slash command. */
+  /** Submit one human turn or dispatch a slash/bang command. */
   submit(text: string): void {
     const trimmed = text.trim()
     if (trimmed === '') {
@@ -220,6 +252,10 @@ export class ChatScreen {
     }
     this.editor.addToHistory(trimmed)
     this.editor.setText('')
+    if (trimmed.startsWith('!')) {
+      void this.runBashCommand(trimmed)
+      return
+    }
     if (trimmed.startsWith('/')) {
       void this.dispatchSlash(trimmed)
       return
@@ -400,7 +436,7 @@ export class ChatScreen {
       this.pushNotice('no user-invocable skills in this workspace')
       return
     }
-    const picked = await pickFromList(this.tui, {
+    const picked = await pickFromListWithSearch(this.tui, {
       title: 'Skills (user-invocable)',
       body: 'pick one to stage /name in the input; send it to invoke',
       items: skills.map((skill) => ({
@@ -412,6 +448,7 @@ export class ChatScreen {
     if (picked !== undefined) {
       this.editor.setText(`/${picked} `)
       this.tui.setFocus(this.editor)
+      this.tui.requestRender()
     }
   }
 
@@ -447,6 +484,95 @@ export class ChatScreen {
     )
   }
 
+  // ── ! shell command (user full authority) ──────────────────────────────────
+
+  private bashRunning = false
+  private bashAbort: AbortController | undefined
+
+  /**
+   * `!cmd` runs a shell command in the session cwd with user full authority
+   * (danger-full-access, pi/Claude Code semantics) and streams its output
+   * into a transcript card; the output joins the model context unless the
+   * `!!` prefix excluded it. Esc aborts.
+   */
+  private async runBashCommand(line: string): Promise<void> {
+    const parsed = parseBang(line)
+    if (parsed === undefined) return
+    if (this.bashRunning) {
+      this.pushNotice('a shell command is already running — press Esc to cancel it first', 'error')
+      return
+    }
+    const shell = this.ctx.get('shell') as
+      | {
+          start(spec: {
+            command: string
+            workdir?: string
+            signal?: AbortSignal
+            sandboxPolicy?: { mode: string; workspaceRoot: string }
+          }): BashProcess
+        }
+      | undefined
+    if (shell === undefined) {
+      this.pushNotice('shell service unavailable', 'error')
+      return
+    }
+    const { command, excluded } = parsed
+    this.bashRunning = true
+    this.bashAbort = new AbortController()
+    const card = pushNotice(this.model, `$ ${command}`, 'info')
+    this.sync()
+
+    try {
+      const process = shell.start({
+        command,
+        workdir: this.cwd,
+        signal: this.bashAbort.signal,
+        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: this.cwd },
+      })
+      // Drain incremental output until the process settles.
+      let output = ''
+      let running = true
+      while (running) {
+        await new Promise((resolve) => setTimeout(resolve, 120))
+        const read = process.readOutput()
+        if (read.delta !== '') {
+          output += read.delta
+          card.text = `$ ${command}${output === '' ? '' : `\n${output}`}`
+          this.sync()
+        }
+        if (process.status !== 'running') running = false
+      }
+      await process.done
+      const read = process.readOutput()
+      if (read.delta !== '') output += read.delta
+      card.text = `$ ${command}${output === '' ? '' : `\n${output}`}`.trimEnd()
+      const exitCode = process.exitCode
+      if (exitCode === 0) {
+        card.notice = 'info'
+      } else {
+        card.notice = 'error'
+        card.text += `\n[exit ${exitCode ?? process.signal ?? 'killed'}]`
+      }
+      if (!excluded) {
+        // Join the model context without waking the driver (pi's
+        // recordBashResult equivalent).
+        this.agent.inject(
+          createUserMessage({
+            content: [{ type: 'text', text: `$ ${command}${output === '' ? '' : `\n${output}`}` }],
+            source: { kind: 'user' },
+          }),
+        )
+      }
+    } catch (error) {
+      card.notice = 'error'
+      card.text += `\nfailed: ${error instanceof Error ? error.message : String(error)}`
+    } finally {
+      this.bashRunning = false
+      this.bashAbort = undefined
+      this.sync()
+    }
+  }
+
   // ── @ file attachment ─────────────────────────────────────────────────────
 
   /** Bare `@` at a token start opens the fuzzy file-attachment picker. */
@@ -466,7 +592,7 @@ export class ChatScreen {
       this.pushNotice('no files found to attach')
       return
     }
-    const picked = await pickFromList(this.tui, {
+    const picked = await pickFromListWithSearch(this.tui, {
       title: 'Attach file',
       items: files.map((file) => ({ value: file, label: file })),
     })
@@ -474,6 +600,7 @@ export class ChatScreen {
       const text = this.editor.getText()
       this.editor.setText(text.replace(/(?:^|[\s(])@\s*$/, ` @${picked} `))
       this.tui.setFocus(this.editor)
+      this.tui.requestRender()
     }
   }
 
@@ -639,4 +766,65 @@ export class ChatScreen {
 
 export function createTui(terminal: import('@earendil-works/pi-tui').Terminal): TUI {
   return new TuiMainScreen(terminal)
+}
+
+/** Minimal ShellProcess surface the `!` command consumes. */
+interface BashProcess {
+  status: 'running' | 'completed' | 'killed'
+  exitCode: number | null
+  signal: string | null
+  readonly done: Promise<void>
+  readOutput(): { delta: string; lossy: boolean }
+}
+
+/**
+ * Tab-restraint wrapper (option B): the editor consults
+ * `shouldTriggerFileCompletion` before a forced Tab completion, so returning
+ * false for non-path-like tokens makes Tab a no-op on plain words. The
+ * inline `/`-command and `@`-mention triggers never pass through this gate.
+ */
+class PathAwareAutocomplete implements AutocompleteProvider {
+  constructor(private readonly inner: AutocompleteProvider) {}
+
+  get triggerCharacters(): string[] | undefined {
+    return this.inner.triggerCharacters
+  }
+
+  shouldTriggerFileCompletion(
+    lines: string[],
+    cursorLine: number,
+    cursorCol: number,
+  ): boolean {
+    const before = (lines[cursorLine] ?? '').slice(0, cursorCol)
+    const token = before.slice(before.lastIndexOf(' ') + 1)
+    return isPathLikeToken(token)
+  }
+
+  async getSuggestions(
+    lines: string[],
+    cursorLine: number,
+    cursorCol: number,
+    options: { signal: AbortSignal; force?: boolean },
+  ) {
+    const before = (lines[cursorLine] ?? '').slice(0, cursorCol)
+    const token = before.slice(before.lastIndexOf(' ') + 1)
+    const suggestions = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
+    if (suggestions === null) return null
+    // Belt and braces: outside slash/@ contexts, only path-like tokens may
+    // receive file suggestions.
+    if (token.startsWith('/') || token.startsWith('@') || isPathLikeToken(token)) {
+      return suggestions
+    }
+    return null
+  }
+
+  applyCompletion(
+    lines: string[],
+    cursorLine: number,
+    cursorCol: number,
+    item: { value: string; label: string; description?: string },
+    prefix: string,
+  ) {
+    return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix)
+  }
 }

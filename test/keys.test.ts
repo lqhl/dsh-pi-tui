@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { ctrlC, cycleEffort, parseSlash, type ExitArm } from '../src/core/keys.js'
+import {
+  ctrlC,
+  cycleEffort,
+  isPathLikeToken,
+  parseBang,
+  parseSlash,
+  type ExitArm,
+} from '../src/core/keys.js'
 
 test('Ctrl+C: working → cancel, never arms', () => {
   const state: ExitArm = { lastPressAt: 0 }
@@ -46,4 +53,20 @@ test('parseSlash splits name and raw input', () => {
   assert.deepEqual(parseSlash('/MODEL'), { name: 'model', raw: '' })
   assert.equal(parseSlash('no slash'), undefined)
   assert.equal(parseSlash(''), undefined)
+})
+
+test('isPathLikeToken gates Tab file completion', () => {
+  assert.equal(isPathLikeToken('hello'), false)
+  assert.equal(isPathLikeToken('src/'), true)
+  assert.equal(isPathLikeToken('./'), true)
+  assert.equal(isPathLikeToken('~'), true)
+  assert.equal(isPathLikeToken('@foo'), true)
+  assert.equal(isPathLikeToken('README.md'), true)
+})
+
+test('parseBang splits ! and !! forms', () => {
+  assert.deepEqual(parseBang('!ls -la'), { command: 'ls -la', excluded: false })
+  assert.deepEqual(parseBang('!! npm test'), { command: 'npm test', excluded: true })
+  assert.equal(parseBang('!!'), undefined)
+  assert.equal(parseBang('hello'), undefined)
 })

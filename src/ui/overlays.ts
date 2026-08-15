@@ -15,7 +15,15 @@ import type {
   AskUserQuestionItem,
   AskUserQuestionRequest,
 } from '@deepseek-ai/dsh-user-questions'
-import { Container, Input, SelectList, Text, type TUI } from '@earendil-works/pi-tui'
+import {
+  Container,
+  Input,
+  SelectList,
+  Text,
+  fuzzyFilter,
+  matchesKey,
+  type TUI,
+} from '@earendil-works/pi-tui'
 import { selectListTheme, style } from './theme.js'
 
 /** Content root forwarding input to a SelectList child. */
@@ -95,6 +103,100 @@ export function pickFromList(
     }
     tui.requestRender()
   })
+}
+
+/**
+ * Search-capable single-choice overlay: an Input above the list live-filters
+ * items with fuzzy scoring (the pi ModelSelector pattern). Enter picks the
+ * top match; Esc cancels.
+ */
+export function pickFromListWithSearch(
+  tui: TUI,
+  options: {
+    title: string
+    body?: string
+    items: ListPickItem[]
+  },
+): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const search = new Input()
+    const list = new SelectList(options.items, Math.min(12, Math.max(2, options.items.length)), selectListTheme)
+    const panel = new SearchPanel(options.title, options.body, search, list, options.items)
+    const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
+    list.onSelect = (item) => {
+      handle.hide()
+      resolve(item.value)
+    }
+    list.onCancel = () => {
+      handle.hide()
+      resolve(undefined)
+    }
+    tui.requestRender()
+  })
+}
+
+/**
+ * Overlay content with a search Input and a SelectList: printable input goes
+ * to the search box (live fuzzy re-filter), navigation keys to the list.
+ */
+class SearchPanel extends Container {
+  private readonly allItems: ListPickItem[]
+  private list: SelectList
+
+  constructor(
+    title: string,
+    body: string | undefined,
+    private readonly search: Input,
+    list: SelectList,
+    allItems: ListPickItem[],
+  ) {
+    super()
+    this.list = list
+    this.allItems = allItems
+    this.addChild(new Text(style.accent(title), 1, 0))
+    if (body !== undefined && body !== '') {
+      for (const line of body.split('\n')) {
+        this.addChild(new Text(line, 1, 0))
+      }
+    }
+    this.addChild(this.search)
+    this.addChild(this.list)
+  }
+
+  handleInput(data: string): void {
+    if (
+      matchesKey(data, 'up') ||
+      matchesKey(data, 'down') ||
+      matchesKey(data, 'enter') ||
+      matchesKey(data, 'escape') ||
+      matchesKey(data, 'pageUp') ||
+      matchesKey(data, 'pageDown')
+    ) {
+      this.list.handleInput(data)
+      return
+    }
+    // Everything else (printable, backspace, word ops) feeds the search box,
+    // then re-filters the list.
+    this.search.handleInput(data)
+    this.refilter()
+  }
+
+  private refilter(): void {
+    const query = this.search.getValue().trim()
+    const filtered =
+      query === ''
+        ? this.allItems
+        : fuzzyFilter(this.allItems, query, (item) => item.label)
+    if (filtered.length === 0) {
+      // Keep the list mounted with a hint instead of an empty select list.
+      filtered.push({ value: '', label: 'no matches', description: 'keep typing or Esc' })
+    }
+    const rebuilt = new SelectList(filtered, Math.min(12, Math.max(2, filtered.length)), selectListTheme)
+    rebuilt.onSelect = this.list.onSelect
+    rebuilt.onCancel = this.list.onCancel
+    this.list = rebuilt
+    this.children[this.children.length - 1] = rebuilt
+  }
 }
 
 /**

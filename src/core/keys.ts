@@ -48,3 +48,26 @@ export function parseSlash(line: string): { name: string; raw: string } | undefi
   if (space === -1) return { name: rest.toLowerCase(), raw: '' }
   return { name: rest.slice(0, space).toLowerCase(), raw: rest.slice(space) }
 }
+
+/**
+ * Whether Tab path completion should offer for this token (Tab-restraint
+ * option B): only tokens that already look like a path or a mention.
+ */
+export function isPathLikeToken(token: string): boolean {
+  return (
+    token.startsWith('@') ||
+    token.startsWith('.') ||
+    token.startsWith('~') ||
+    token.includes('/') ||
+    token.includes('.')
+  )
+}
+
+/** Parse a bang line: `!cmd` (output joins context) / `!!cmd` (excluded). */
+export function parseBang(line: string): { command: string; excluded: boolean } | undefined {
+  if (!line.startsWith('!')) return undefined
+  const excluded = line.startsWith('!!')
+  const command = excluded ? line.slice(2).trim() : line.slice(1).trim()
+  if (command === '') return undefined
+  return { command, excluded }
+}

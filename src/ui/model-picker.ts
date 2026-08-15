@@ -7,7 +7,7 @@
  */
 import type { LlmModelInfo } from '@deepseek-ai/dsh-llm'
 import type { TUI } from '@earendil-works/pi-tui'
-import { pickFromList, type ListPickItem } from './overlays.js'
+import { pickFromListWithSearch, type ListPickItem } from './overlays.js'
 
 export interface ModelRoute {
   provider: string
@@ -52,7 +52,7 @@ export async function pickModel(
 ): Promise<ModelRoute | undefined> {
   const routes = await listAllModels(llm)
   if (routes.length === 0) return undefined
-  const picked = await pickFromList(tui, {
+  const picked = await pickFromListWithSearch(tui, {
     title: 'Select model',
     body: current !== undefined ? `current: ${current.model} (${current.provider})` : undefined,
     items: routes.map((route, index) => toItem(route, current, index)),
