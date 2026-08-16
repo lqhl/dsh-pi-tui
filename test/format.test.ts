@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { visibleWidth } from '@earendil-works/pi-tui'
 import { contextPctOf, renderContextBar, sandboxShort, shortTokens } from '../src/core/format.js'
 
 test('sandboxShort maps modes to compact labels', () => {
@@ -30,7 +31,8 @@ test('renderContextBar fills 10 cells and handles unknowns', () => {
   assert.equal(renderContextBar(500, 0), undefined)
   const bar = renderContextBar(500, 1000)
   assert.ok(bar !== undefined)
-  assert.equal(bar.length, 10)
+  // ANSI color codes count toward string length; assert the VISIBLE width.
+  assert.equal(visibleWidth(bar), 10)
   const red = renderContextBar(950, 1000)
   const yellow = renderContextBar(800, 1000)
   const green = renderContextBar(500, 1000)
