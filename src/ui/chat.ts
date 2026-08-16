@@ -42,7 +42,7 @@ import {
   type SlashCommand,
   type TUI,
 } from '@earendil-works/pi-tui'
-import { applyEvent, createModel, pushNotice, type ChatItem, type ChatModel } from '../core/model.js'
+import { applyEvent, createModel, pushNotice, textOf, type ChatItem, type ChatModel } from '../core/model.js'
 import { runRgFiles, shouldShowPath } from '../core/files.js'
 import {
   ctrlC,
@@ -319,8 +319,23 @@ export class ChatScreen {
     for (const event of next.session.events) {
       this.handleEvent(event)
     }
+    this.seedHistory()
     this.tui.terminal.setTitle(`dsh-pi-tui · ${basename(this.cwd)}`)
     this.sync()
+  }
+
+  /**
+   * Seed the editor's ↑/↓ history from the current session's user messages
+   * (pi semantics: the session transcript, not just this-run submissions).
+   * Entries accumulate across switches, newest last; the editor caps at 100.
+   */
+  seedHistory(): void {
+    const userTexts = this.model.items
+      .filter((item) => item.kind === 'user')
+      .map((item) => item.text)
+    for (const text of userTexts.slice(-100)) {
+      this.editor.addToHistory(text)
+    }
   }
 
   /** Switch and notify the app layer (which owns old-handle disposal). */
@@ -1260,36 +1275,109 @@ export class ChatScreen {
     this.tui.requestRender()
   }
 
-  /** Fuzzy search over the transcript; picking a message loads it into the
-   * editor for re-sending or editing. */
+  /**
+   * Fuzzy search over the transcript plus the first user prompt of recently
+   * persisted sessions (CC-style cross-session history); picking a message
+   * loads it into the editor for re-sending or editing.
+   */
   private async cmdHistorySearch(): Promise<void> {
     const entries = this.model.items
       .filter((item) => item.kind === 'user' || item.kind === 'assistant')
       .map((item) => ({
-        id: String(item.id),
+        id: `cur:${item.id}`,
         text: item.text,
-        label: `${item.kind === 'user' ? '❯ ' : ''}${item.text.replace(/\s+/g, ' ').slice(0, 90)}`,
+        label: `${item.kind === 'user' ? '❯ ' : '✎ '}${item.text.replace(/\s+/g, ' ').slice(0, 80)}`,
         kind: item.kind,
       }))
-    if (entries.length === 0) {
+    const past = await this.pastPrompts()
+    const items = [
+      ...entries.map((entry) => ({
+        value: entry.id,
+        label: entry.label,
+        description: `this session · ${entry.kind}`,
+      })),
+      ...past.map((prompt) => ({
+        value: `past:${prompt.index}`,
+        label: `⏱ ${prompt.cwd} · ${prompt.text.replace(/\s+/g, ' ').slice(0, 70)}`,
+        description: `past session ${prompt.sessionId.slice(0, 8)}`,
+      })),
+    ]
+    if (items.length === 0) {
       this.pushNotice('no messages yet')
       return
     }
     const picked = await pickFromListWithSearch(this.tui, {
       title: 'Search history',
-      items: entries.map((entry) => ({
-        value: entry.id,
-        label: entry.label,
-        description: entry.kind,
-      })),
+      body:
+        past.length > 0
+          ? 'this session first, then the first prompt of recent persisted sessions'
+          : undefined,
+      items,
     })
-    if (picked !== undefined) {
-      const entry = entries.find((candidate) => candidate.id === picked)
-      if (entry !== undefined) {
-        this.editor.setText(entry.text)
+    if (picked === undefined) return
+    if (picked.startsWith('past:')) {
+      const index = Number(picked.slice(5))
+      const prompt = past[index]
+      if (prompt !== undefined) {
+        this.editor.setText(prompt.text)
         this.tui.setFocus(this.editor)
         this.tui.requestRender()
       }
+      return
+    }
+    const entry = entries.find((candidate) => candidate.id === picked)
+    if (entry !== undefined) {
+      this.editor.setText(entry.text)
+      this.tui.setFocus(this.editor)
+      this.tui.requestRender()
+    }
+  }
+
+  /** First user prompt of each recent persisted session (lazy, bounded). */
+  private async pastPrompts(): Promise<
+    { index: number; sessionId: string; cwd: string; text: string }[]
+  > {
+    const persistence = this.ctx.get('sessionPersistence') as
+      | {
+          list(signal?: AbortSignal): Promise<readonly { id: string; cwd?: string; createdAt: number }[]>
+          load(id: unknown): Promise<{ events: readonly SessionEvent[] }>
+        }
+      | undefined
+    if (persistence === undefined) return []
+    try {
+      const headers = [...(await persistence.list())]
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, 15)
+      const results: { index: number; sessionId: string; cwd: string; text: string }[] = []
+      for (const header of headers) {
+        if (String(header.id) === this.currentSessionId) continue
+        try {
+          const { events } = await persistence.load(header.id)
+          const first = events.find(
+            (event) =>
+              event.type === 'user/message' &&
+              (event.data as { source?: { kind?: string } }).source?.kind === 'user',
+          )
+          if (first !== undefined) {
+            const text = textOf(
+              (first.data as { content?: Parameters<typeof textOf>[0] }).content,
+            )
+            if (text !== '') {
+              results.push({
+                index: results.length,
+                sessionId: String(header.id),
+                cwd: basename(header.cwd ?? '') || 'session',
+                text,
+              })
+            }
+          }
+        } catch {
+          // Skip unreadable sessions.
+        }
+      }
+      return results
+    } catch {
+      return []
     }
   }
 

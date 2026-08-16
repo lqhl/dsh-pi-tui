@@ -144,6 +144,8 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   for (const event of agent.session.events) {
     screen.handleEvent(event)
   }
+  // ↑/↓ history: seed the editor from the replayed session transcript.
+  screen.seedHistory()
 
   ctx.on('session/event', (session, event) => {
     if (screenOwns(session.id)) {

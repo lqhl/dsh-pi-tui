@@ -28,7 +28,8 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 | `Ctrl+T` | 展开/折叠 thinking 块 |
 | `Ctrl+O` | 展开/折叠工具完整输出 / diff |
 | `Ctrl+L` | 打开模型选择器 |
-| `Ctrl+R` | 模糊搜索消息历史（选中载入输入框） |
+| `Ctrl+R` | 搜索消息历史：本会话 + 最近持久化会话的首条消息（选中载入输入框） |
+| `↑` / `↓` | 浏览当前会话的消息历史（恢复/切换后自动载入） |
 | `Ctrl+Z` | 挂起到后台（`fg` 恢复） |
 | `Ctrl+G` | 用 `$EDITOR` 编辑输入 |
 | `Shift+Tab` | 循环思考强度（off→high→max） |
