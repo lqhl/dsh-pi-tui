@@ -285,7 +285,7 @@ dsh-pi-tui/
 | M0 脚手架 + 冒烟 | ✅ 2026-08-14 |
 | M1 会话闭环 | ✅ 2026-08-14（真实会话回放验证） |
 | M2 交互对等 | ✅ 2026-08-14（slash/审批/提问/投影/notice，16 项单测全绿，PTY 冒烟验证 /plan） |
-| M3 工程化 + 发布 | 🟡 GitHub ✅（main/v0.1.0/CI workflow 已推送，workflow scope 已授权）；awesome PR #11 ✅；npm publish ⏸ 用户暂停（试用反馈 bug 优先，待修复验证后由用户决定发布，token 需 Automation 类型） |
+| M3 工程化 + 发布 | ✅ 2026-08-16：GitHub（main + CI）✅；awesome PR #11 ✅；**npm 已发布**——0.1.0（手动首发布）→ 0.1.1（CI 经 npm Trusted Publishers OIDC + provenance 签名发布，零 token/secret）；全新 profile `pi-tui-npm` 从 npm 安装端到端验证通过 |
 | UX 增强（用户反馈） | ✅ 2026-08-14：Ctrl+C 两段式/Ctrl+D/Esc 中断、/model+/thinking（installModelSelection 链路）、@ 文件菜单、/skills、Ctrl+T/Ctrl+O 键位迁移、request/header 状态栏回读、resume 路由修复——23 项单测 + 全部 PTY 冒烟通过 |
 | UX 增强（第二轮） | ✅ 2026-08-14/15：! 命令（用户全权）、@ fuzzy 搜索 + rg 数据源（.gitignore 语义 + 隐藏文件策略 + 显示上限）、Tab 收窄、skills 补全、overlay Enter/Esc 修复 + 按键回归测试、CJK 宽度修复 |
 | P0-P2 功能补全 | ✅ 2026-08-16：P0（/new /fork /resume /tree、状态栏 plan/goal/context/jobs/preset、--preset + setup 挂载、/agents /jobs、/export /rename）；P1（Ctrl+R 历史搜索、meta.diffs 彩色 diff、plan-review 特化弹窗）；P2（read_image 内联图片、Ctrl+Z 挂起、Ctrl+G 外部编辑器）——36 项单测 + 全量 PTY 回归通过 |

@@ -79,6 +79,8 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 | 0.1.0-rc.6 | >= 22.19（CI 跑 22/24） | ✅ 测试通过 |
 | 其他 rc | — | 未验证，欢迎反馈 |
 
+发布：npm 上的每次发版由 GitHub Actions 经 [npm Trusted Publishers](https://docs.npmjs.com/trusted-publishers)（OIDC）发布，带 provenance 签名——打 `v*` tag 即发布，无任何 token。
+
 ## 开发
 
 ```sh
