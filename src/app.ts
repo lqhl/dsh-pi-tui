@@ -10,8 +10,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { ProcessTerminal, TuiMainScreen, type TUI } from '@earendil-works/pi-tui'
 import { parseArgs, USAGE } from './args.js'
-import { listSessions, resolveAgent } from './core/session.js'
+import { listPresets, listSessions, resolveAgent, type ResolvedAgent } from './core/session.js'
 import { pickSession } from './ui/session-picker.js'
+import { pickFromListWithSearch } from './ui/overlays.js'
 import { confirmApproval, askQuestions } from './ui/overlays.js'
 import { ChatScreen } from './ui/chat.js'
 
@@ -65,7 +66,27 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   tui.start()
 
   const agentOptions = { provider: effectiveProvider, model: effectiveModel }
-  const meta = { cwd: config.cwd ?? process.cwd() }
+
+  // Preset picker when `--preset` is given without an id.
+  let preset = args.preset
+  if (preset === undefined && args.pickPreset) {
+    const presets = await listPresets(ctx)
+    if (presets.length === 0) {
+      throw new Error('pi-tui: no agent presets available (--preset)')
+    }
+    preset = await pickFromListWithSearch(tui, {
+      title: 'Select preset',
+      items: presets.map((entry) => ({
+        value: entry.id,
+        label: entry.name ?? entry.id,
+        description: entry.description,
+      })),
+    })
+  }
+  const meta = {
+    cwd: config.cwd ?? process.cwd(),
+    ...(preset !== undefined ? { agentPreset: preset } : {}),
+  }
 
   // Session picker when `--resume` is given without an id.
   let sessionId = args.resumeId ?? sessionConfig
@@ -80,7 +101,7 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   // Approval waterfall answerer: answer permission questions for OUR agent
   // only; every other request continues down the chain.
   ctx.on('approval/request', (request, next) => {
-    if (request.agent.id !== agent.id) return next()
+    if (!screenOwns(request.agent.id)) return next()
     return confirmApproval(tui, request)
   })
 
@@ -100,11 +121,23 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
       provider: effectiveProvider,
       model: effectiveModel,
       cwd: config.cwd,
+      preset,
     },
     onQuit: () => {
       disposeRootAndExit(ctx, 0)
     },
+    onAgentSwitch: (next: ResolvedAgent) => {
+      const old = current
+      current = next
+      if (old.handle !== undefined && old.agent !== next.agent) {
+        void old.handle.dispose().catch(() => {
+          // The registry teardown still covers a failed dispose.
+        })
+      }
+    },
   })
+  let current: ResolvedAgent = { agent }
+  const screenOwns = (id: unknown): boolean => screen.ownsSession(id)
 
   // Replay the durable log first so the transcript paints on the first
   // frame; only then subscribe, so no event is folded twice.
@@ -113,7 +146,7 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   }
 
   ctx.on('session/event', (session, event) => {
-    if (session.id === agent.id) {
+    if (screenOwns(session.id)) {
       screen.handleEvent(event)
     }
   })

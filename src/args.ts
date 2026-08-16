@@ -9,6 +9,10 @@ export interface PiTuiArgs {
   resumeId?: string
   /** `--resume` without a value: pick from the persisted-session list. */
   pickSession: boolean
+  /** Agent preset id (from `--preset <id>`). */
+  preset?: string
+  /** `--preset` without a value: pick from the preset roster. */
+  pickPreset: boolean
   /** `--help` / `-h`: print usage and exit. */
   help: boolean
   /** Unrecognized positional/flags, reported as a usage error. */
@@ -16,7 +20,7 @@ export interface PiTuiArgs {
 }
 
 export function parseArgs(argv: readonly string[]): PiTuiArgs {
-  const args: PiTuiArgs = { pickSession: false, help: false, unknown: [] }
+  const args: PiTuiArgs = { pickSession: false, pickPreset: false, help: false, unknown: [] }
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]
     if (token === '--resume' || token === '-r') {
@@ -26,6 +30,16 @@ export function parseArgs(argv: readonly string[]): PiTuiArgs {
         i += 1
       } else {
         args.pickSession = true
+      }
+      continue
+    }
+    if (token === '--preset' || token === '-p') {
+      const value = argv[i + 1]
+      if (value !== undefined && !value.startsWith('-')) {
+        args.preset = value
+        i += 1
+      } else {
+        args.pickPreset = true
       }
       continue
     }
@@ -44,6 +58,8 @@ Usage:
   dsh --profile pi-tui                 start a fresh session
   dsh --profile pi-tui --resume <id>   reopen a persisted session
   dsh --profile pi-tui --resume        pick a persisted session from a list
+  dsh --profile pi-tui --preset <id>   choose an agent preset (standard/minimal/code…)
+  dsh --profile pi-tui --preset        pick a preset from the roster
   dsh --profile pi-tui --help          this help
 
 Keys:
@@ -53,11 +69,20 @@ Keys:
   Ctrl+T     toggle thinking display
   Ctrl+O     toggle full tool output
   Ctrl+L     model picker · Shift+Tab cycle thinking
+  Ctrl+R     search message history
+  Ctrl+Z     suspend to background
   Tab        complete paths · / slash commands · @ attach files
 
 Commands:
+  /new                    start a fresh session
+  /fork                   fork this session at its current end
+  /resume [query]         list sessions / reopen one
+  /tree                   subagent session tree
   /model [query]          switch model (picker without a query)
   /thinking off|high|max  set thinking effort (next step)
   /skills                 list user-invocable skills
+  /agents                 list live subagents
+  /jobs                   list background jobs
+  /export                 write this transcript to a markdown file
   /hotkeys                this key table
   /compact /goal /plan /feedback   official dsh commands`

@@ -180,6 +180,11 @@ export interface StatusBarData {
   tokens?: { input: number; output: number }
   todos?: { done: number; total: number }
   title?: string
+  preset?: string
+  planActive?: boolean
+  goalPhase?: string
+  contextPct?: number
+  jobsRunning?: number
 }
 
 /** Single-line status bar; truncates to the terminal width. */
@@ -193,14 +198,19 @@ export class StatusBar implements Component {
   update(data: StatusBarData): void {
     const parts: string[] = ['dsh-pi-tui']
     if (data.model !== undefined) parts.push(data.model)
+    if (data.preset !== undefined) parts.push(data.preset)
+    if (data.planActive === true) parts.push('⌘plan')
+    if (data.goalPhase !== undefined) parts.push(`◈${data.goalPhase}`)
     if (data.sessionId !== undefined) parts.push(data.sessionId.slice(0, 8))
     if (data.cwd !== undefined) parts.push(data.cwd)
     if (data.tokens !== undefined) {
       parts.push(`in ${data.tokens.input} out ${data.tokens.output}`)
     }
+    if (data.contextPct !== undefined) parts.push(`ctx ${data.contextPct}%`)
     if (data.todos !== undefined && data.todos.total > 0) {
       parts.push(`☐ ${data.todos.done}/${data.todos.total}`)
     }
+    if (data.jobsRunning !== undefined) parts.push(`⚙ ${data.jobsRunning}`)
     if (data.title !== undefined) parts.push(data.title)
     this.text = style.statusBar(parts.join(' · '))
   }

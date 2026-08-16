@@ -23,6 +23,16 @@ test('parses --help and collects unknown tokens', () => {
 
 test('empty argv yields defaults', () => {
   const args = parseArgs([])
-  assert.deepEqual(args, { pickSession: false, help: false, unknown: [] })
+  assert.deepEqual(args, { pickSession: false, pickPreset: false, help: false, unknown: [] })
   assert.equal(args.resumeId, undefined)
+  assert.equal(args.preset, undefined)
+})
+
+test('parses --preset with an id and bare --preset', () => {
+  const withId = parseArgs(['--preset', 'minimal'])
+  assert.equal(withId.preset, 'minimal')
+  assert.equal(withId.pickPreset, false)
+  const bare = parseArgs(['--preset'])
+  assert.equal(bare.preset, undefined)
+  assert.equal(bare.pickPreset, true)
 })

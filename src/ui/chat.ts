@@ -26,7 +26,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { createUserMessage, ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { isUserInvocable, type SkillSummary } from '@deepseek-ai/dsh-skill'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   CombinedAutocompleteProvider,
   Container,
@@ -52,6 +52,7 @@ import {
 import { editorTheme, style } from './theme.js'
 import { createView, StatusBar, updateView, type StatusBarData } from './views.js'
 import { listAllModels, pickModel, type LlmRuntimeLike, type ModelRoute } from './model-picker.js'
+import { forkSession, listSessions, resolveAgent, type ResolvedAgent } from '../core/session.js'
 import { pickFromList, pickFromListWithSearch } from './overlays.js'
 
 export interface ChatScreenOptions {
@@ -62,8 +63,11 @@ export interface ChatScreenOptions {
     provider?: string
     model?: string
     cwd?: string
+    preset?: string
   }
   onQuit: () => void
+  /** Called after a successful in-session agent switch (new/fork/resume). */
+  onAgentSwitch?: (resolved: ResolvedAgent) => void
 }
 
 interface LlmRuntime extends LlmRuntimeLike {
@@ -76,16 +80,18 @@ interface LlmRuntime extends LlmRuntimeLike {
 export class ChatScreen {
   private readonly ctx: Context
   private readonly tui: TUI
-  private readonly agent: Agent
+  private agent: Agent
   private readonly config: ChatScreenOptions['config']
   private readonly cwd: string
   private readonly commands: CommandRuntime | undefined
-  private readonly model: ChatModel = createModel()
+  private readonly onAgentSwitch: ((resolved: ResolvedAgent) => void) | undefined
+  private model: ChatModel = createModel()
   private readonly messages = new Container()
   private readonly statusBar = new StatusBar()
   private readonly editor: Editor
-  /** One-per-agent mutable model selection (grok/web pattern; install once). */
+  /** One-per-agent mutable model selection (grok/web pattern; install once per agent). */
   private readonly selection: ModelSelectionRef = { current: undefined, assembled: undefined }
+  private disposeSelection: (() => void) | undefined
   private exitArm: ExitArm = { lastPressAt: 0 }
   private workingLoader: Loader | undefined
   private readonly views = new Map<number, ReturnType<typeof createView>>()
@@ -100,30 +106,11 @@ export class ChatScreen {
     this.config = options.config
     this.cwd = options.config.cwd ?? process.cwd()
     this.commands = this.ctx.get('commands') as CommandRuntime | undefined
+    this.onAgentSwitch = options.onAgentSwitch
 
-    // Seed the selection so every step has a route, including RESUMED agents
-    // (whose creation never saw our agentOptions): the persisted request
-    // header wins, then the row config, then the harness defaults.
-    const headerConfig = this.agent.session.requestHeader()?.config
-    const seedRoute = {
-      provider:
-        headerConfig?.provider ??
-        this.config.provider ??
-        this.agent.options.provider ??
-        'deepseek-official',
-      model:
-        headerConfig?.model ??
-        this.config.model ??
-        this.agent.options.model ??
-        'deepseek-v4-flash',
-    }
-    this.selection.current = {
-      ...seedRoute,
-      ...(headerConfig?.reasoningEffort !== undefined
-        ? { reasoningEffort: ReasoningEffortId(headerConfig.reasoningEffort) }
-        : {}),
-    }
-    installModelSelection(this.agent.ctx, this.selection)
+    this.seedSelection()
+    this.seedSelection()
+    this.disposeSelection = installModelSelection(this.agent.ctx, this.selection)
 
     this.tui.addChild(this.messages)
     this.tui.addChild(this.statusBar)
@@ -142,9 +129,17 @@ export class ChatScreen {
         name: descriptor.name,
         description: descriptor.description,
       })),
+      { name: 'new', description: 'Start a fresh session' },
+      { name: 'fork', description: 'Fork this session at its current end' },
+      { name: 'resume', description: 'List sessions / reopen one' },
+      { name: 'tree', description: 'Subagent session tree' },
       { name: 'model', description: 'Switch model', getArgumentCompletions: (prefix) => this.modelCompletions(prefix) },
       { name: 'thinking', description: 'Set thinking effort (off/high/max)' },
       { name: 'skills', description: 'List user-invocable skills' },
+      { name: 'agents', description: 'List live subagents' },
+      { name: 'jobs', description: 'List background jobs' },
+      { name: 'export', description: 'Write this transcript to a markdown file' },
+      { name: 'rename', description: 'Rename this session' },
       { name: 'hotkeys', description: 'Show key bindings' },
     ]
     this.editor.setAutocompleteProvider(
@@ -244,6 +239,259 @@ export class ChatScreen {
     this.agent.cancel({ kind: 'user' }, { keepInbox: true })
   }
 
+  private isBusy(): boolean {
+    return this.isWorking() || this.bashRunning
+  }
+
+  /** The session id the screen currently renders. */
+  get currentSessionId(): string {
+    return String(this.agent.session.id)
+  }
+
+  ownsSession(id: unknown): boolean {
+    return id === this.agent.session.id || String(id) === String(this.agent.session.id)
+  }
+
+  /**
+   * Seed the model selection so every step has a route, including RESUMED
+   * agents (whose creation never saw our agentOptions): the persisted
+   * request header wins, then the row config, then the harness defaults.
+   */
+  private seedSelection(): void {
+    const headerConfig = this.agent.session.requestHeader()?.config
+    const seedRoute = {
+      provider:
+        headerConfig?.provider ??
+        this.config.provider ??
+        this.agent.options.provider ??
+        'deepseek-official',
+      model:
+        headerConfig?.model ??
+        this.config.model ??
+        this.agent.options.model ??
+        'deepseek-v4-flash',
+    }
+    this.selection.current = {
+      ...seedRoute,
+      ...(headerConfig?.reasoningEffort !== undefined
+        ? { reasoningEffort: ReasoningEffortId(headerConfig.reasoningEffort) }
+        : {}),
+    }
+  }
+
+  /**
+   * Rebind the screen to another live agent (new/fork/resume): tear down the
+   * old per-agent selection install, reset the transcript, reinstall and
+   * reseed the selection, replay the durable log, and repaint.
+   */
+  async switchAgent(next: Agent): Promise<void> {
+    if (next === this.agent) return
+    if (this.isBusy()) {
+      this.pushNotice('cannot switch sessions while work is running (Esc to interrupt)', 'error')
+      return
+    }
+    this.disposeSelection?.()
+    this.agent = next
+    this.model = createModel()
+    this.views.clear()
+    this.messages.clear()
+    if (this.workingLoader !== undefined) {
+      this.workingLoader.stop()
+      this.workingLoader = undefined
+    }
+    this.seedSelection()
+    this.disposeSelection = installModelSelection(this.agent.ctx, this.selection)
+    for (const event of next.session.events) {
+      this.handleEvent(event)
+    }
+    this.tui.terminal.setTitle(`dsh-pi-tui · ${basename(this.cwd)}`)
+    this.sync()
+  }
+
+  /** Switch and notify the app layer (which owns old-handle disposal). */
+  private async commitSwitch(resolved: ResolvedAgent): Promise<void> {
+    await this.switchAgent(resolved.agent)
+    this.onAgentSwitch?.(resolved)
+  }
+
+  // ── session management commands ────────────────────────────────────────────
+
+  private sessionOptions() {
+    const route = this.currentRoute()
+    return {
+      provider: route.provider,
+      model: route.model,
+    }
+  }
+
+  private sessionMeta() {
+    return {
+      cwd: this.cwd,
+      ...(this.config.preset !== undefined ? { agentPreset: this.config.preset } : {}),
+    }
+  }
+
+  private async cmdNew(): Promise<void> {
+    if (this.isBusy()) {
+      this.pushNotice('cannot switch sessions while work is running (Esc to interrupt)', 'error')
+      return
+    }
+    try {
+      const resolved = await resolveAgent(
+        this.ctx,
+        undefined,
+        this.sessionOptions(),
+        this.sessionMeta(),
+      )
+      await this.commitSwitch(resolved)
+      this.pushNotice(`new session ${this.currentSessionId.slice(0, 8)}`)
+    } catch (error) {
+      this.pushNotice(`/new failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
+
+  private async cmdFork(): Promise<void> {
+    if (this.isBusy()) {
+      this.pushNotice('cannot fork while work is running (Esc to interrupt)', 'error')
+      return
+    }
+    try {
+      const resolved = await forkSession(
+        this.ctx,
+        this.agent,
+        this.sessionOptions(),
+        this.sessionMeta(),
+      )
+      await this.commitSwitch(resolved)
+      this.pushNotice(`forked → ${this.currentSessionId.slice(0, 8)} (history kept, lineage recorded)`)
+    } catch (error) {
+      this.pushNotice(`/fork failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
+
+  private async cmdResume(raw: string): Promise<void> {
+    if (this.isBusy()) {
+      this.pushNotice('cannot switch sessions while work is running (Esc to interrupt)', 'error')
+      return
+    }
+    let target = raw.trim()
+    if (target === '') {
+      const headers = await listSessions(this.ctx)
+      if (headers.length === 0) {
+        this.pushNotice('no persisted sessions')
+        return
+      }
+      target = (await pickFromListWithSearch(this.tui, {
+        title: 'Resume session',
+        items: headers.map((header) => ({
+          value: String(header.id),
+          label: `${basename(header.cwd ?? '')} · ${String(header.id).slice(0, 8)}`,
+          description: new Date(header.createdAt).toLocaleString(),
+        })),
+      })) ?? ''
+    }
+    if (target === '') return
+    try {
+      const resolved = await resolveAgent(
+        this.ctx,
+        target,
+        this.sessionOptions(),
+        this.sessionMeta(),
+      )
+      await this.commitSwitch(resolved)
+      this.pushNotice(`resumed ${this.currentSessionId.slice(0, 8)}`)
+    } catch (error) {
+      this.pushNotice(`/resume failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
+
+  private async cmdTree(): Promise<void> {
+    const subs = this.ctx.get('subagents') as
+      | {
+          listDescendants(
+            root: unknown,
+            signal?: AbortSignal,
+          ): Promise<
+            readonly { id: string; depth: number; mode: string; activity: string; hasChildren?: boolean }[]
+          >
+        }
+      | undefined
+    if (subs === undefined) {
+      this.pushNotice('subagent service unavailable', 'error')
+      return
+    }
+    const nodes = await subs.listDescendants(this.agent.session.id).catch(() => [])
+    if (nodes.length === 0) {
+      this.pushNotice('no subagent sessions under this root')
+      return
+    }
+    const picked = await pickFromListWithSearch(this.tui, {
+      title: 'Session tree',
+      items: nodes.map((node) => ({
+        value: node.id,
+        label: `${'  '.repeat(Math.min(node.depth, 6))}${node.mode === 'continuable' ? '◈' : '◦'} ${node.id.slice(0, 8)}`,
+        description: `${node.activity}${node.hasChildren === true ? ' · has children' : ''}`,
+      })),
+    })
+    if (picked !== undefined) {
+      const resolved = await resolveAgent(this.ctx, picked, this.sessionOptions(), this.sessionMeta())
+      await this.commitSwitch(resolved)
+    }
+  }
+
+  private async cmdAgents(): Promise<void> {
+    const subs = this.ctx.get('subagents') as
+      | {
+          listChildren(
+            parent: unknown,
+            signal?: AbortSignal,
+          ): Promise<
+            readonly { id: string; mode: string; activity: string; hasChildren?: boolean }[]
+          >
+        }
+      | undefined
+    if (subs === undefined) {
+      this.pushNotice('subagent service unavailable', 'error')
+      return
+    }
+    const nodes = await subs.listChildren(this.agent.session.id).catch(() => [])
+    if (nodes.length === 0) {
+      this.pushNotice('no live subagents')
+      return
+    }
+    await pickFromListWithSearch(this.tui, {
+      title: 'Subagents',
+      items: nodes.map((node) => ({
+        value: node.id,
+        label: `${node.mode === 'continuable' ? '◈' : '◦'} ${node.id.slice(0, 8)}`,
+        description: `${node.activity}${node.hasChildren === true ? ' · has children' : ''}`,
+      })),
+    })
+  }
+
+  private async cmdJobs(): Promise<void> {
+    const jobs = this.ctx.get('jobs') as
+      | { list(caller?: unknown): readonly { id: string; kind: string; label: string; status: string }[] }
+      | undefined
+    if (jobs === undefined) {
+      this.pushNotice('jobs service unavailable', 'error')
+      return
+    }
+    const snapshots = jobs.list(this.agent)
+    if (snapshots.length === 0) {
+      this.pushNotice('no background jobs')
+      return
+    }
+    await pickFromListWithSearch(this.tui, {
+      title: 'Background jobs',
+      items: snapshots.map((job) => ({
+        value: job.id,
+        label: `${job.id} · ${job.label || job.kind}`,
+        description: job.status,
+      })),
+    })
+  }
+
   /** Submit one human turn or dispatch a slash/bang command. */
   submit(text: string): void {
     const trimmed = text.trim()
@@ -283,6 +531,14 @@ export class ChatScreen {
     if (parsed.name === 'model') return this.cmdModel(parsed.raw.trim())
     if (parsed.name === 'thinking') return this.cmdThinking(parsed.raw.trim())
     if (parsed.name === 'skills') return this.cmdSkills()
+    if (parsed.name === 'new') return this.cmdNew()
+    if (parsed.name === 'fork') return this.cmdFork()
+    if (parsed.name === 'resume') return this.cmdResume(parsed.raw)
+    if (parsed.name === 'tree') return this.cmdTree()
+    if (parsed.name === 'agents') return this.cmdAgents()
+    if (parsed.name === 'jobs') return this.cmdJobs()
+    if (parsed.name === 'export') return this.cmdExport()
+    if (parsed.name === 'rename') return this.cmdRename(parsed.raw.trim())
     if (parsed.name === 'hotkeys') return this.cmdHotkeys()
 
     if (this.commands !== undefined) {
@@ -467,6 +723,63 @@ export class ChatScreen {
       return all.filter((skill) => isUserInvocable(skill))
     } catch {
       return []
+    }
+  }
+
+  private async cmdExport(): Promise<void> {
+    const fs = this.ctx.get('fs') as
+      | { resolve(path: string): Promise<unknown>; writeText(target: unknown, content: string): Promise<void> }
+      | undefined
+    if (fs === undefined) {
+      this.pushNotice('fs service unavailable', 'error')
+      return
+    }
+    const lines: string[] = []
+    for (const item of this.model.items) {
+      if (item.kind === 'user') {
+        lines.push(`## User\n\n${item.text}\n`)
+      } else if (item.kind === 'assistant') {
+        lines.push(`## Assistant\n\n${item.text}\n`)
+      } else if (item.kind === 'reasoning') {
+        lines.push(`<details><summary>Thinking</summary>\n\n${item.text}\n</details>\n`)
+      } else if (item.kind === 'tool') {
+        lines.push(
+          `### Tool: ${item.tool?.name ?? ''}\n\n\`\`\`\n${item.tool?.argsPreview ?? ''}\n\`\`\`\n\n${item.tool?.resultFull ?? item.tool?.resultPreview ?? ''}\n`,
+        )
+      } else if (item.kind === 'notice') {
+        lines.push(`> ${item.text}\n`)
+      }
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const path = `${this.cwd}/dsh-pi-tui-export-${stamp}-${this.currentSessionId.slice(0, 8)}.md`
+    try {
+      const target = await fs.resolve(path)
+      await fs.writeText(target, lines.join('\n'))
+      this.pushNotice(`exported → ${path}`)
+    } catch (error) {
+      this.pushNotice(`export failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
+
+  private async cmdRename(title: string): Promise<void> {
+    if (title === '') {
+      this.pushNotice('usage: /rename <title>', 'error')
+      return
+    }
+    const service = this.ctx.get('sessionTitle') as
+      | { rename(session: unknown, title: string): void }
+      | undefined
+    if (service === undefined) {
+      this.pushNotice('session title service unavailable', 'error')
+      return
+    }
+    try {
+      service.rename(this.agent.session, title)
+      this.model.title = title
+      this.sync()
+      this.pushNotice(`session renamed: ${title}`)
+    } catch (error) {
+      this.pushNotice(`rename failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
     }
   }
 
@@ -763,6 +1076,9 @@ export class ChatScreen {
     // UI read models; fall back to the locally folded counters.
     let tokens = this.model.tokens
     let todos: { done: number; total: number } | undefined
+    let planActive: boolean | undefined
+    let goalPhase: string | undefined
+    let contextPct: number | undefined
     try {
       const projections = this.ctx.get('sessionProjections') as
         | { snapshot(session: unknown): { values: Record<string, unknown> } }
@@ -781,8 +1097,39 @@ export class ChatScreen {
           total: todoList.length,
         }
       }
+      const plan = values?.plan as { active?: boolean } | undefined
+      planActive = plan?.active === true
+      const goalValue = values?.goal as
+        | { goal?: { phase?: string } }
+        | null
+        | undefined
+      goalPhase = goalValue?.goal?.phase
+      const pressure = values?.contextPressure as
+        | { pressureTokens?: number; projectedTokens?: number; contextWindow?: number }
+        | undefined
+      if (pressure?.contextWindow !== undefined && pressure.contextWindow > 0) {
+        const pressureTokens = pressure.projectedTokens ?? pressure.pressureTokens
+        if (pressureTokens !== undefined) {
+          contextPct = Math.min(100, Math.round((100 * pressureTokens) / pressure.contextWindow))
+        }
+      }
     } catch {
       // Projections are an optional capability; the folded counters suffice.
+    }
+
+    // Live background-job count (process-local snapshot, cheap per event).
+    let jobsRunning: number | undefined
+    try {
+      const jobs = this.ctx.get('jobs') as
+        | { list(caller?: unknown): readonly { status: string }[] }
+        | undefined
+      const snapshots = jobs?.list(this.agent)
+      if (snapshots !== undefined) {
+        const running = snapshots.filter((job) => job.status === 'running').length
+        jobsRunning = running > 0 ? running : undefined
+      }
+    } catch {
+      // Jobs are optional.
     }
 
     const route = this.currentRoute()
@@ -794,6 +1141,11 @@ export class ChatScreen {
       tokens,
       todos,
       title: this.model.title,
+      preset: this.config.preset,
+      planActive,
+      goalPhase,
+      contextPct,
+      jobsRunning,
     }
     this.statusBar.update(status)
     this.tui.requestRender()
