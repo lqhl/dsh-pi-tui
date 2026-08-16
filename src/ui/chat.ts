@@ -43,6 +43,8 @@ import {
   type TUI,
 } from '@earendil-works/pi-tui'
 import { applyEvent, createModel, pushNotice, textOf, type ChatItem, type ChatModel } from '../core/model.js'
+import { seedModelSelection } from '../core/selection.js'
+import { AgentDefaultModelService, JobsService, SessionProjectionsService } from '../core/services.js'
 import { runRgFiles, shouldShowPath } from '../core/files.js'
 import {
   ctrlC,
@@ -52,7 +54,7 @@ import {
   parseSlash,
   type ExitArm,
 } from '../core/keys.js'
-import { contextPctOf } from '../core/format.js'
+import { collectProjection } from '../core/projection.js'
 import { editorTheme, style } from './theme.js'
 import { createView, StatusBar, ToolCardView, updateView, type StatusBarData } from './views.js'
 import { listAllModels, pickModel, type LlmRuntimeLike, type ModelRoute } from './model-picker.js'
@@ -87,7 +89,6 @@ export class ChatScreen {
   private readonly tui: TUI
   private agent: Agent
   private readonly config: ChatScreenOptions['config']
-  private readonly cwd: string
   private readonly commands: CommandRuntime | undefined
   private readonly onAgentSwitch: ((resolved: ResolvedAgent) => void) | undefined
   private model: ChatModel = createModel()
@@ -103,17 +104,19 @@ export class ChatScreen {
   private expandReasoning = false
   private expandTools = false
   private atPickerOpen = false
+  /** In-flight official slash command's abort signal (Esc interrupts it). */
+  private slashAbort: AbortController | undefined
+  /** Last counted running background jobs (refreshed outside the chunk hot path). */
+  private cachedJobsRunning: number | undefined
 
   constructor(options: ChatScreenOptions) {
     this.ctx = options.ctx
     this.tui = options.tui
     this.agent = options.agent
     this.config = options.config
-    this.cwd = options.config.cwd ?? process.cwd()
     this.commands = this.ctx.get('commands') as CommandRuntime | undefined
     this.onAgentSwitch = options.onAgentSwitch
 
-    this.seedSelection()
     this.seedSelection()
     this.disposeSelection = installModelSelection(this.agent.ctx, this.selection)
 
@@ -128,44 +131,7 @@ export class ChatScreen {
 
     // pi-tui's combined provider: slash commands (official + local UI
     // commands) plus file-path completion anchored at the session cwd.
-    const slashCommands: SlashCommand[] = [
-      ...(this.commands?.list(this.agent) ?? []).map((descriptor) => ({
-        name: descriptor.name,
-        description: descriptor.description,
-      })),
-      { name: 'new', description: 'Start a fresh session' },
-      { name: 'fork', description: 'Fork this session at its current end' },
-      { name: 'resume', description: 'List sessions / reopen one' },
-      { name: 'tree', description: 'Subagent session tree' },
-      { name: 'model', description: 'Switch model', getArgumentCompletions: (prefix) => this.modelCompletions(prefix) },
-      { name: 'thinking', description: 'Set thinking effort (off/high/max)' },
-      { name: 'skills', description: 'List user-invocable skills' },
-      { name: 'agents', description: 'List live subagents' },
-      { name: 'jobs', description: 'List background jobs' },
-      { name: 'export', description: 'Write this transcript to a markdown file' },
-      { name: 'rename', description: 'Rename this session' },
-      { name: 'hotkeys', description: 'Show key bindings' },
-    ]
-    this.editor.setAutocompleteProvider(
-      new PathAwareAutocomplete(
-        new CombinedAutocompleteProvider(slashCommands, this.cwd),
-      ),
-    )
-    // Rebuild the provider once the skill catalog arrives so `/` completes
-    // user-invocable skills too (plain `/name` — the dsh pre-step gesture
-    // recognizes that token, not pi's `/skill:name` form).
-    void this.listSkills().then((skills) => {
-      const withSkills: SlashCommand[] = [
-        ...slashCommands,
-        ...skills.map((skill) => ({
-          name: skill.name,
-          description: skill.description ?? skill.whenToUse ?? 'skill',
-        })),
-      ]
-      this.editor.setAutocompleteProvider(
-        new PathAwareAutocomplete(new CombinedAutocompleteProvider(withSkills, this.cwd)),
-      )
-    })
+    this.rebuildAutocomplete()
     // Layout: messages, editor, then the status line pinned at the BOTTOM
     // (pi/Claude Code convention).
     this.tui.addChild(this.editor)
@@ -181,6 +147,11 @@ export class ChatScreen {
         // A running human shell command owns Esc first (pi semantics).
         if (this.bashRunning) {
           this.bashAbort?.abort()
+          return { consume: true }
+        }
+        // Then an in-flight official slash command (e.g. /plan).
+        if (this.slashAbort !== undefined) {
+          this.slashAbort.abort()
           return { consume: true }
         }
         if (this.isWorking()) {
@@ -272,6 +243,16 @@ export class ChatScreen {
     return String(this.agent.session.id)
   }
 
+  /**
+   * The live session's working directory, from its durable header. Anchors
+   * `!`/`@`/exports so they match the tools' cwd even after a resume from
+   * another directory (resume cannot carry a fresh cwd — the session keeps
+   * the one it was created in).
+   */
+  private get cwd(): string {
+    return this.agent.session.header.cwd ?? this.config.cwd ?? process.cwd()
+  }
+
   ownsSession(id: unknown): boolean {
     return id === this.agent.session.id || String(id) === String(this.agent.session.id)
   }
@@ -282,25 +263,21 @@ export class ChatScreen {
    * request header wins, then the row config, then the harness defaults.
    */
   private seedSelection(): void {
-    const headerConfig = this.agent.session.requestHeader()?.config
-    const seedRoute = {
-      provider:
-        headerConfig?.provider ??
-        this.config.provider ??
-        this.agent.options.provider ??
-        'deepseek-official',
-      model:
-        headerConfig?.model ??
-        this.config.model ??
-        this.agent.options.model ??
-        'deepseek-v4-flash',
-    }
-    this.selection.current = {
-      ...seedRoute,
-      ...(headerConfig?.reasoningEffort !== undefined
-        ? { reasoningEffort: ReasoningEffortId(headerConfig.reasoningEffort) }
-        : {}),
-    }
+    this.selection.current = seedModelSelection({
+      header: this.agent.session.requestHeader()?.config,
+      config: this.config,
+      agentOptions: this.agent.options,
+      defaults: this.defaultSelection(),
+      prior: this.selection.current,
+    })
+  }
+
+  /** The harness's shared default-model selection (same source as app.ts). */
+  private defaultSelection():
+    | { provider?: string; model?: string; reasoningEffort?: string }
+    | undefined {
+    const service = this.ctx.get('agentDefaultModel') as AgentDefaultModelService | undefined
+    return service?.currentSelection()
   }
 
   /**
@@ -330,6 +307,7 @@ export class ChatScreen {
       this.handleEvent(event)
     }
     this.seedHistory()
+    this.rebuildAutocomplete()
     this.tui.terminal.setTitle(`dsh-pi-tui · ${basename(this.cwd)}`)
     this.sync()
   }
@@ -360,6 +338,53 @@ export class ChatScreen {
     for (const text of userTexts.slice(-100)) {
       this.editor.addToHistory(text)
     }
+  }
+
+  /**
+   * Rebuild the editor's autocomplete provider (official + local slash
+   * commands, then file-path completion anchored at the current session
+   * cwd). Re-run after every agent switch so path completion follows the
+   * new session's directory and official commands reflect its preset.
+   */
+  private rebuildAutocomplete(): void {
+    const slashCommands: SlashCommand[] = [
+      ...(this.commands?.list(this.agent) ?? []).map((descriptor) => ({
+        name: descriptor.name,
+        description: descriptor.description,
+      })),
+      { name: 'new', description: 'Start a fresh session' },
+      { name: 'fork', description: 'Fork this session at its current end' },
+      { name: 'resume', description: 'List sessions / reopen one' },
+      { name: 'tree', description: 'Subagent session tree' },
+      { name: 'model', description: 'Switch model', getArgumentCompletions: (prefix) => this.modelCompletions(prefix) },
+      { name: 'thinking', description: 'Set thinking effort (off/high/max)' },
+      { name: 'skills', description: 'List user-invocable skills' },
+      { name: 'agents', description: 'List live subagents' },
+      { name: 'jobs', description: 'List background jobs' },
+      { name: 'export', description: 'Write this transcript to a markdown file' },
+      { name: 'rename', description: 'Rename this session' },
+      { name: 'hotkeys', description: 'Show key bindings' },
+    ]
+    this.editor.setAutocompleteProvider(
+      new PathAwareAutocomplete(
+        new CombinedAutocompleteProvider(slashCommands, this.cwd),
+      ),
+    )
+    // Rebuild the provider once the skill catalog arrives so `/` completes
+    // user-invocable skills too (plain `/name` — the dsh pre-step gesture
+    // recognizes that token, not pi's `/skill:name` form).
+    void this.listSkills().then((skills) => {
+      const withSkills: SlashCommand[] = [
+        ...slashCommands,
+        ...skills.map((skill) => ({
+          name: skill.name,
+          description: skill.description ?? skill.whenToUse ?? 'skill',
+        })),
+      ]
+      this.editor.setAutocompleteProvider(
+        new PathAwareAutocomplete(new CombinedAutocompleteProvider(withSkills, this.cwd)),
+      )
+    })
   }
 
   /** Switch and notify the app layer (which owns old-handle disposal). */
@@ -524,9 +549,7 @@ export class ChatScreen {
   }
 
   private async cmdJobs(): Promise<void> {
-    const jobs = this.ctx.get('jobs') as
-      | { list(caller?: unknown): readonly { id: string; kind: string; label: string; status: string }[] }
-      | undefined
+    const jobs = this.ctx.get('jobs') as JobsService | undefined
     if (jobs === undefined) {
       this.pushNotice('jobs service unavailable', 'error')
       return
@@ -595,23 +618,7 @@ export class ChatScreen {
     if (parsed.name === 'rename') return this.cmdRename(parsed.raw.trim())
     if (parsed.name === 'hotkeys') return this.cmdHotkeys()
 
-    if (this.commands !== undefined) {
-      try {
-        const execution = await this.commands.execute(this.agent, line, new AbortController().signal)
-        if (execution !== undefined) {
-          const result = execution.result
-          if (result.kind === 'success') this.pushNotice(result.text ?? line)
-          else this.pushNotice(result.text, 'error')
-          return
-        }
-      } catch (error) {
-        this.pushNotice(
-          `command failed: ${error instanceof Error ? error.message : String(error)}`,
-          'error',
-        )
-        return
-      }
-    }
+    if (await this.executeCommand(line)) return
 
     // User-invocable skills ride a plain `/skillname` message; the
     // dsh-tool-skill pre-step gesture picks it up. Don't swallow it.
@@ -621,6 +628,40 @@ export class ChatScreen {
       return
     }
     this.pushNotice(`unknown command: ${line}`, 'error')
+  }
+
+  /**
+   * Execute an official slash command through the registry with a
+   * cancellable signal (Esc aborts via `this.slashAbort`). Returns true when
+   * the command was dispatched — handled or failed — so callers stop
+   * fall-through; false means the registry returned nothing (unhandled line).
+   */
+  private async executeCommand(line: string): Promise<boolean> {
+    if (this.commands === undefined) return false
+    const controller = new AbortController()
+    this.slashAbort = controller
+    try {
+      const execution = await this.commands.execute(this.agent, line, controller.signal)
+      if (execution !== undefined) {
+        const result = execution.result
+        if (result.kind === 'success') this.pushNotice(result.text ?? line)
+        else this.pushNotice(result.text, 'error')
+        return true
+      }
+      return false
+    } catch (error) {
+      if (controller.signal.aborted) {
+        this.pushNotice('command interrupted', 'info')
+      } else {
+        this.pushNotice(
+          `command failed: ${error instanceof Error ? error.message : String(error)}`,
+          'error',
+        )
+      }
+      return true
+    } finally {
+      if (this.slashAbort === controller) this.slashAbort = undefined
+    }
   }
 
   // ── local UI commands ─────────────────────────────────────────────────────
@@ -672,15 +713,21 @@ export class ChatScreen {
     if (llm === undefined) return
     try {
       const resolved = await llm.resolveCallConfig({ provider: route.provider, model: route.model })
-      this.selection.current = { provider: resolved.provider, model: resolved.model }
+      // Preserve the selected reasoning effort across a model switch; the
+      // adapter re-resolves it for the new model on the next request.
+      this.selection.current = {
+        provider: resolved.provider,
+        model: resolved.model,
+        ...(this.selection.current?.reasoningEffort !== undefined
+          ? { reasoningEffort: this.selection.current.reasoningEffort }
+          : {}),
+      }
       // Write the shared default too (grok rationale: the web host's outer
       // waterfall fallback chain reads it, so a stale selection can't
       // overwrite this one).
       try {
-        const defaults = this.ctx.get('agentDefaultModel') as
-          | { saveSelection(next: unknown): Promise<void> }
-          | undefined
-        await defaults?.saveSelection({ provider: resolved.provider, model: resolved.model })
+        const defaults = this.ctx.get('agentDefaultModel') as AgentDefaultModelService | undefined
+        await defaults?.saveSelection(this.selection.current)
       } catch {
         // Best effort; session selection already applied.
       }
@@ -749,19 +796,13 @@ export class ChatScreen {
     }
     const plan = this.planState()
     const line = plan ? '/plan off' : '/plan'
-    try {
-      await this.commands.execute(this.agent, line, new AbortController().signal)
-    } catch (error) {
-      this.pushNotice(`mode switch failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
-    }
+    await this.executeCommand(line)
   }
 
   /** Plan-mode state from the projection (active, or pending-on). */
   private planState(): boolean {
     try {
-      const projections = this.ctx.get('sessionProjections') as
-        | { snapshot(session: unknown): { values: Record<string, unknown> } }
-        | undefined
+      const projections = this.ctx.get('sessionProjections') as SessionProjectionsService | undefined
       const plan = projections?.snapshot(this.agent.session).values?.plan as
         | { active?: boolean; wanted?: boolean | null }
         | undefined
@@ -931,18 +972,21 @@ export class ChatScreen {
         signal: this.bashAbort.signal,
         sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: this.cwd },
       })
-      // Drain incremental output until the process settles.
+      // Drain incremental output until the process settles: read first (no
+      // initial lag), then wait for settlement or a short poll tick.
       let output = ''
-      let running = true
-      while (running) {
-        await new Promise((resolve) => setTimeout(resolve, 120))
+      const tick = (): Promise<boolean> => new Promise((resolve) => setTimeout(() => resolve(false), 50))
+      while (true) {
         const read = process.readOutput()
         if (read.delta !== '') {
           output += read.delta
           card.text = `$ ${command}${output === '' ? '' : `\n${output}`}`
           this.sync()
         }
-        if (process.status !== 'running') running = false
+        if (process.status !== 'running') break
+        // Wake immediately on settlement, otherwise poll on a short tick.
+        const settled = await Promise.race([process.done.then(() => true), tick()])
+        if (settled) break
       }
       await process.done
       const read = process.readOutput()
@@ -961,7 +1005,10 @@ export class ChatScreen {
         this.agent.inject(
           createUserMessage({
             content: [{ type: 'text', text: `$ ${command}${output === '' ? '' : `\n${output}`}` }],
-            source: { kind: 'user' },
+            // A plugin source (not `user`) so the fold does not render this
+            // injected context as a second user bubble — the notice card
+            // above is the visible record; this only feeds the model.
+            source: { kind: 'plugin', plugin: 'pi-tui' },
           }),
         )
       }
@@ -1007,7 +1054,7 @@ export class ChatScreen {
     }
   }
 
-  private rgCache: string[] | undefined
+  private rgCache: { cwd: string; files: string[] } | undefined
 
   /**
    * Enumerate attachable files. Primary source: one ripgrep run with the
@@ -1015,10 +1062,11 @@ export class ChatScreen {
    * excludes); falls back to the ctx.fs walker when rg is unavailable.
    */
   private async listWorkspaceFiles(): Promise<string[]> {
-    if (this.rgCache !== undefined) return this.rgCache
+    if (this.rgCache?.cwd === this.cwd) return this.rgCache.files
     const viaRg = await this.tryRgListing()
-    this.rgCache = viaRg.length > 0 ? viaRg : await this.walkFallback()
-    return this.rgCache
+    const files = viaRg.length > 0 ? viaRg : await this.walkFallback()
+    this.rgCache = { cwd: this.cwd, files }
+    return files
   }
 
   private async tryRgListing(): Promise<string[]> {
@@ -1125,7 +1173,23 @@ export class ChatScreen {
   handleEvent(event: SessionEvent): void {
     applyEvent(this.model, event)
     if (event.type === 'tool/result') void this.resolveImages(event)
-    this.sync()
+    // Skip the jobs re-count during the chunk hot path; the next non-chunk
+    // event (or explicit sync) refreshes it.
+    this.sync(event.type !== 'assistant/chunk')
+  }
+
+  /** Count the agent's running background jobs (process-local snapshot). */
+  private countRunningJobs(): number | undefined {
+    try {
+      const jobs = this.ctx.get('jobs') as JobsService | undefined
+      const snapshots = jobs?.list(this.agent)
+      if (snapshots === undefined) return undefined
+      const running = snapshots.filter((job) => job.status === 'running').length
+      return running > 0 ? running : undefined
+    } catch {
+      // Jobs are optional.
+      return undefined
+    }
   }
 
   /**
@@ -1218,7 +1282,7 @@ export class ChatScreen {
   }
 
   /** Create views for new items, refresh changed ones, fix the chrome. */
-  private sync(): void {
+  private sync(refreshJobs = true): void {
     const { items } = this.model
     for (let index = this.views.size; index < items.length; index++) {
       const item = items[index]
@@ -1250,8 +1314,9 @@ export class ChatScreen {
       this.workingLoader = undefined
     }
 
-    // Session projections (todo list, token meter) are the authoritative
-    // UI read models; fall back to the locally folded counters.
+    // Session projections (todo list, token meter, permissions) are the
+    // authoritative UI read models; read ONE snapshot and fold it, falling
+    // back to the locally folded counters.
     let tokens = this.model.tokens
     let todos: { done: number; total: number } | undefined
     let planActive: boolean | undefined
@@ -1259,71 +1324,23 @@ export class ChatScreen {
     let contextPct: number | undefined
     let contextUsed: number | undefined
     let contextTotal: number | undefined
-    try {
-      const projections = this.ctx.get('sessionProjections') as
-        | { snapshot(session: unknown): { values: Record<string, unknown> } }
-        | undefined
-      const values = projections?.snapshot(this.agent.session).values
-      const usage = values?.tokenUsage as
-        | { totals?: { uncachedInputTokens: number; outputTokens: number } }
-        | undefined
-      if (usage?.totals !== undefined) {
-        tokens = { input: usage.totals.uncachedInputTokens, output: usage.totals.outputTokens }
-      }
-      const todoList = values?.todos as { status: string }[] | null | undefined
-      if (Array.isArray(todoList)) {
-        todos = {
-          done: todoList.filter((entry) => entry.status === 'completed').length,
-          total: todoList.length,
-        }
-      }
-      const plan = values?.plan as { active?: boolean } | undefined
-      planActive = plan?.active === true
-      const goalValue = values?.goal as
-        | { goal?: { phase?: string } }
-        | null
-        | undefined
-      goalPhase = goalValue?.goal?.phase
-      const pressure = values?.contextPressure as
-        | { pressureTokens?: number; projectedTokens?: number; contextWindow?: number }
-        | undefined
-      contextPct = contextPctOf(pressure)
-      if (pressure?.contextWindow !== undefined && pressure.contextWindow > 0) {
-        contextTotal = pressure.contextWindow
-        const used = pressure.projectedTokens ?? pressure.pressureTokens
-        if (used !== undefined) contextUsed = used
-      }
-    } catch {
-      // Projections are an optional capability; the folded counters suffice.
-    }
-
-    // Live background-job count (process-local snapshot, cheap per event).
-    let jobsRunning: number | undefined
-    try {
-      const jobs = this.ctx.get('jobs') as
-        | { list(caller?: unknown): readonly { status: string }[] }
-        | undefined
-      const snapshots = jobs?.list(this.agent)
-      if (snapshots !== undefined) {
-        const running = snapshots.filter((job) => job.status === 'running').length
-        jobsRunning = running > 0 ? running : undefined
-      }
-    } catch {
-      // Jobs are optional.
-    }
-
-    // Permission preset (sandbox mode + approval policy bundled), from the
-    // official permissions projection; falls back to the raw sandbox mode.
     let sandboxMode: string | undefined
     try {
-      const projections = this.ctx.get('sessionProjections') as
-        | { snapshot(session: unknown): { values: Record<string, unknown> } }
-        | undefined
-      const permissions = projections?.snapshot(this.agent.session).values
-        ?.permissions as { currentValue?: string } | undefined
+      const projections = this.ctx.get('sessionProjections') as SessionProjectionsService | undefined
+      const values = projections?.snapshot(this.agent.session).values
+      const projection = collectProjection(values, this.model.tokens)
+      tokens = projection.tokens
+      todos = projection.todos
+      planActive = projection.planActive
+      goalPhase = projection.goalPhase
+      contextPct = projection.contextPct
+      contextUsed = projection.contextUsed
+      contextTotal = projection.contextTotal
+      // Permission preset rides the same snapshot (no second call).
+      const permissions = values?.permissions as { currentValue?: string } | undefined
       sandboxMode = permissions?.currentValue
     } catch {
-      // Optional service.
+      // Projections are an optional capability; the folded counters suffice.
     }
     if (sandboxMode === undefined) {
       try {
@@ -1335,6 +1352,11 @@ export class ChatScreen {
         // Optional service.
       }
     }
+
+    // Live background-job count (process-local snapshot, refreshed outside
+    // the streaming chunk hot path — handleEvent passes refreshJobs=false).
+    if (refreshJobs) this.cachedJobsRunning = this.countRunningJobs()
+    const jobsRunning = this.cachedJobsRunning
 
     const route = this.currentRoute()
     const effort = this.currentEffort()

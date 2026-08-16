@@ -40,6 +40,20 @@ test('skips injected (non-user) context', () => {
   assert.equal(model.items.length, 0)
 })
 
+test('injected ! command context (plugin pi-tui) is not a user bubble', () => {
+  const model = createModel()
+  applyEvent(
+    model,
+    event('user/message', {
+      source: { kind: 'plugin', plugin: 'pi-tui' },
+      content: [{ type: 'text', text: '$ ls\nfile.txt' }],
+    }),
+  )
+  // The visible record is the local notice card; the injected context must
+  // not render a second user bubble.
+  assert.equal(model.items.length, 0)
+})
+
 test('streams text and reasoning deltas into separate items, seals on message', () => {
   const model = createModel()
   applyEvent(model, event('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', text: 'thinking' } }, 1))

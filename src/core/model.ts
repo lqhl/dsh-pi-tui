@@ -68,6 +68,9 @@ export interface ChatModel {
   effort?: string
   /** Provider/model route the last request actually used. */
   route?: { provider?: string; model?: string }
+  /** Open streaming items for O(1) chunk folding (internal, not rendered). */
+  openAssistant?: ChatItem
+  openReasoning?: ChatItem
 }
 
 const ARGS_PREVIEW_LIMIT = 200
@@ -155,7 +158,8 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       const text = textOf(event.data.message.content)
       if (text) item.text = text
       item.streaming = false
-      sealReasoning(model, event.seq)
+      model.openAssistant = undefined
+      sealReasoning(model)
       const usage = event.data.usage
       if (usage !== undefined) {
         model.tokens.input += usage.inputTokens ?? 0
@@ -244,6 +248,8 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       for (const item of model.items) {
         if (item.kind === 'reasoning') item.streaming = false
       }
+      model.openReasoning = undefined
+      model.openAssistant = undefined
       // Surface non-completed endings as notices.
       const reason = event.data.reason
       if (reason.kind === 'error') {
@@ -262,27 +268,30 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
   return model
 }
 
-/** The open streaming item of a kind for the current step, or a fresh one. */
+/** The open streaming item of a kind for the current step, or a fresh one.
+ * The open-item cache keeps chunk folding O(1) instead of re-scanning the
+ * transcript on every delta. */
 function currentStreaming(
   model: ChatModel,
   kind: 'assistant' | 'reasoning',
   seq?: number,
 ): ChatItem {
-  const existing = model.items
-    .filter((item) => item.kind === kind && item.streaming)
-    .at(-1)
+  const existing = kind === 'assistant' ? model.openAssistant : model.openReasoning
   if (existing !== undefined) return existing
   const item: ChatItem = { id: model.items.length, kind, text: '', streaming: true, seq }
   model.items.push(item)
+  if (kind === 'assistant') model.openAssistant = item
+  else model.openReasoning = item
   return item
 }
 
 /** Seal the open reasoning item for the step (collapse to a label). */
-function sealReasoning(model: ChatModel, _seq?: number): void {
-  const item = model.items
-    .filter((entry) => entry.kind === 'reasoning' && entry.streaming)
-    .at(-1)
-  if (item !== undefined) item.streaming = false
+function sealReasoning(model: ChatModel): void {
+  const item = model.openReasoning
+  if (item !== undefined) {
+    item.streaming = false
+    model.openReasoning = undefined
+  }
 }
 
 /** Push a UI-side notice (slash-command results, errors) into the transcript. */

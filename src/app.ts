@@ -11,6 +11,7 @@ import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { ProcessTerminal, TuiMainScreen, type TUI } from '@earendil-works/pi-tui'
 import { parseArgs, USAGE } from './args.js'
 import { listPresets, listSessions, resolveAgent, type ResolvedAgent } from './core/session.js'
+import { AgentDefaultModelService } from './core/services.js'
 import { pickSession } from './ui/session-picker.js'
 import { pickFromListWithSearch } from './ui/overlays.js'
 import { confirmApproval, askQuestions } from './ui/overlays.js'
@@ -43,9 +44,7 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
 
   // Provider/model route: explicit row config wins; otherwise inherit the
   // harness's default-model selection (settings.yaml), matching the web app.
-  const agentDefaultModel = ctx.get('agentDefaultModel') as
-    | { currentSelection(): { provider: string; model: string; reasoningEffort?: string } }
-    | undefined
+  const agentDefaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelService | undefined
   const defaultSelection = agentDefaultModel?.currentSelection()
   const effectiveProvider = provider ?? defaultSelection?.provider
   const effectiveModel = model ?? defaultSelection?.model
@@ -95,7 +94,11 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
     sessionId = await pickSession(tui, headers)
   }
 
-  const { agent } = await resolveAgent(ctx, sessionId, agentOptions, meta)
+  const resolved = await resolveAgent(ctx, sessionId, agentOptions, meta)
+  const agent = resolved.agent
+  // Keep the handle so the initial agent is disposed on the first in-session
+  // switch (new/fork/resume) — dropping it leaked its scoped context.
+  let current: ResolvedAgent = resolved
 
   // ── human-interaction seams ────────────────────────────────────────────────
   // Approval waterfall answerer: answer permission questions for OUR agent
@@ -136,7 +139,6 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
       }
     },
   })
-  let current: ResolvedAgent = { agent }
   const screenOwns = (id: unknown): boolean => screen.ownsSession(id)
 
   // Replay the durable log first so the transcript paints on the first
