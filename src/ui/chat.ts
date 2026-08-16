@@ -57,7 +57,8 @@ import { editorTheme, style } from './theme.js'
 import { createView, StatusBar, ToolCardView, updateView, type StatusBarData } from './views.js'
 import { listAllModels, pickModel, type LlmRuntimeLike, type ModelRoute } from './model-picker.js'
 import { forkSession, listSessions, resolveAgent, type ResolvedAgent } from '../core/session.js'
-import { pickFromList, pickFromListWithSearch } from './overlays.js'
+import { pickFromListWithSearch } from './overlays.js'
+import { buildBanner } from './banner.js'
 
 export interface ChatScreenOptions {
   ctx: Context
@@ -117,7 +118,6 @@ export class ChatScreen {
     this.disposeSelection = installModelSelection(this.agent.ctx, this.selection)
 
     this.tui.addChild(this.messages)
-    this.tui.addChild(this.statusBar)
     this.editor = new Editor(this.tui, editorTheme, { paddingX: 1 })
     this.editor.onSubmit = (text) => {
       this.submit(text)
@@ -144,7 +144,6 @@ export class ChatScreen {
       { name: 'jobs', description: 'List background jobs' },
       { name: 'export', description: 'Write this transcript to a markdown file' },
       { name: 'rename', description: 'Rename this session' },
-      { name: 'permission', description: 'Switch sandbox mode (ws/ro/danger)' },
       { name: 'hotkeys', description: 'Show key bindings' },
     ]
     this.editor.setAutocompleteProvider(
@@ -167,7 +166,10 @@ export class ChatScreen {
         new PathAwareAutocomplete(new CombinedAutocompleteProvider(withSkills, this.cwd)),
       )
     })
+    // Layout: messages, editor, then the status line pinned at the BOTTOM
+    // (pi/Claude Code convention).
     this.tui.addChild(this.editor)
+    this.tui.addChild(this.statusBar)
     this.tui.setFocus(this.editor)
 
     this.tui.addInputListener((data: string) => {
@@ -245,6 +247,7 @@ export class ChatScreen {
       return undefined
     })
 
+    this.showBanner()
     this.tui.terminal.setTitle(`dsh-pi-tui · ${basename(this.cwd)}`)
     this.sync()
     // NOTE: the app layer already started the TUI (it must be live for the
@@ -316,6 +319,7 @@ export class ChatScreen {
     this.model = createModel()
     this.views.clear()
     this.messages.clear()
+    this.showBanner()
     if (this.workingLoader !== undefined) {
       this.workingLoader.stop()
       this.workingLoader = undefined
@@ -328,6 +332,20 @@ export class ChatScreen {
     this.seedHistory()
     this.tui.terminal.setTitle(`dsh-pi-tui · ${basename(this.cwd)}`)
     this.sync()
+  }
+
+  /** Welcome block at the top of the transcript (boot and every switch). */
+  showBanner(): void {
+    const route = this.currentRoute()
+    pushNotice(
+      this.model,
+      buildBanner({
+        cwd: basename(this.cwd),
+        preset: this.config.preset,
+        model: route.model,
+      }),
+      'banner',
+    )
   }
 
   /**
@@ -575,7 +593,6 @@ export class ChatScreen {
     if (parsed.name === 'jobs') return this.cmdJobs()
     if (parsed.name === 'export') return this.cmdExport()
     if (parsed.name === 'rename') return this.cmdRename(parsed.raw.trim())
-    if (parsed.name === 'permission') return this.cmdPermission(parsed.raw.trim())
     if (parsed.name === 'hotkeys') return this.cmdHotkeys()
 
     if (this.commands !== undefined) {
@@ -751,41 +768,6 @@ export class ChatScreen {
       return plan?.active === true || plan?.wanted === true
     } catch {
       return false
-    }
-  }
-
-  /** /permission <ws|ro|danger>: switch the session sandbox mode. */
-  private async cmdPermission(raw: string): Promise<void> {
-    const MODES: Record<string, string> = {
-      ws: 'workspace-write',
-      'ws-write': 'workspace-write',
-      ro: 'read-only',
-      'read-only': 'read-only',
-      danger: 'danger-full-access',
-      'danger-full-access': 'danger-full-access',
-    }
-    const mode = MODES[raw]
-    if (mode === undefined) {
-      this.pushNotice('usage: /permission <ws|ro|danger>', 'error')
-      return
-    }
-    if (mode === 'danger-full-access') {
-      const picked = await pickFromList(this.tui, {
-        title: 'Switch to danger-full-access?',
-        body: 'every shell/fs call runs without confinement for this session',
-        items: [
-          { value: 'yes', label: '✓ Switch' },
-          { value: 'no', label: '✗ Cancel' },
-        ],
-      })
-      if (picked !== 'yes') return
-    }
-    try {
-      const { setSandboxMode } = await import('@deepseek-ai/dsh-sandbox-policy')
-      setSandboxMode(this.agent.session, mode as never)
-      this.pushNotice(`permission → ${mode}`)
-    } catch (error) {
-      this.pushNotice(`permission switch failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
     }
   }
 
@@ -1330,15 +1312,28 @@ export class ChatScreen {
       // Jobs are optional.
     }
 
-    // Resolved per-session sandbox mode (session override > deployment).
+    // Permission preset (sandbox mode + approval policy bundled), from the
+    // official permissions projection; falls back to the raw sandbox mode.
     let sandboxMode: string | undefined
     try {
-      const policy = this.ctx.get('sandboxPolicy') as
-        | { resolve(request?: { session?: unknown }): { mode: string } }
+      const projections = this.ctx.get('sessionProjections') as
+        | { snapshot(session: unknown): { values: Record<string, unknown> } }
         | undefined
-      sandboxMode = policy?.resolve({ session: this.agent.session }).mode
+      const permissions = projections?.snapshot(this.agent.session).values
+        ?.permissions as { currentValue?: string } | undefined
+      sandboxMode = permissions?.currentValue
     } catch {
       // Optional service.
+    }
+    if (sandboxMode === undefined) {
+      try {
+        const policy = this.ctx.get('sandboxPolicy') as
+          | { resolve(request?: { session?: unknown }): { mode: string } }
+          | undefined
+        sandboxMode = policy?.resolve({ session: this.agent.session }).mode
+      } catch {
+        // Optional service.
+      }
     }
 
     const route = this.currentRoute()

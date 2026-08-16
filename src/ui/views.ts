@@ -102,11 +102,16 @@ export class NoticeView extends Text {
 
   updateFromItem(): void {
     const flavor = this.item.notice ?? 'info'
-    const marker =
-      flavor === 'error' ? style.toolError('✗') : flavor === 'compact' ? style.accent('»') : style.muted('ℹ')
     const key = `${flavor}:${this.item.text}`
     if (key !== this.lastKey) {
       this.lastKey = key
+      if (flavor === 'banner') {
+        // Pre-colored block; render verbatim without a marker.
+        this.setText(this.item.text)
+        return
+      }
+      const marker =
+        flavor === 'error' ? style.toolError('✗') : flavor === 'compact' ? style.accent('»') : style.muted('ℹ')
       const text = flavor === 'error' ? style.toolError(this.item.text) : style.muted(this.item.text)
       this.setText(`${marker} ${text}`)
     }

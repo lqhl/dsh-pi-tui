@@ -53,7 +53,7 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 | `/jobs` | 列出后台任务 |
 | `/export` | 导出 transcript 为 markdown |
 | `/rename <title>` | 重命名会话（官方 sessionTitle 服务） |
-| `/permission <ws\|ro\|danger>` | 切换沙箱模式（danger 需确认） |
+| `/permission [preset]` | 官方权限 preset 切换（workspace-write / danger-full-access…） |
 | `/hotkeys` | 显示键位表 |
 | `/compact` `/goal` `/plan` `/feedback` | 官方 dsh 命令（自动发现） |
 
@@ -69,6 +69,8 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 - 会话管理：创建、恢复、fork、子代理树、选择器（官方持久化后端）
 - 状态栏：provider/model、preset、plan 指示、goal 状态、上下文压力 `ctx N%`、会话 id、token 统计、todo 进度、后台任务计数（全部来自官方 projection/jobs 服务）
 - 转场提示：compaction 检查点、turn 失败/中止/超长提示
+- 启动 banner：品牌蓝 ASCII 鲸鱼 + 会话信息 + 键位提示（boot 与会话切换时）
+- 权限：官方 `/permission <preset>`（沙箱模式 + 审批策略捆绑切换），状态栏显示当前 preset
 
 ## 支持矩阵
 

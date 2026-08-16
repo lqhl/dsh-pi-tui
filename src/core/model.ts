@@ -51,8 +51,9 @@ export interface ChatItem {
   streaming: boolean
   seq?: number
   tool?: ToolCardState
-  /** Notice flavor: info (slash results), error, or compact checkpoint. */
-  notice?: 'info' | 'error' | 'compact'
+  /** Notice flavor: info (slash results), error, compact checkpoint, or the
+   * pre-colored startup banner. */
+  notice?: 'info' | 'error' | 'compact' | 'banner'
 }
 
 export interface ChatModel {
