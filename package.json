@@ -60,5 +60,9 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lqhl/dsh-pi-tui.git"
   }
 }
