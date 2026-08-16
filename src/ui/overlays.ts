@@ -116,6 +116,21 @@ export function pickFromListWithSearch(
   return new Promise((resolve) => {
     const search = new Input()
     const list = new SelectList(options.items, Math.min(12, Math.max(2, options.items.length)), selectListTheme)
+    let handle: ReturnType<TUI['showOverlay']> | undefined
+    const onSelect = (item: { value: string; label: string; description?: string }): void => {
+      if (item.value === '__nomatch__') return // placeholder is not a pick
+      handle?.hide()
+      resolve(item.value)
+    }
+    const onCancel = (): void => {
+      handle?.hide()
+      resolve(undefined)
+    }
+    // Wire handlers BEFORE the panel's constructor refilter rebuilds the
+    // list: the rebuilt list copies handlers from this original one, so
+    // late assignment would target a list no longer in the panel.
+    list.onSelect = onSelect
+    list.onCancel = onCancel
     const panel = new SearchPanel(
       options.title,
       options.body,
@@ -124,18 +139,7 @@ export function pickFromListWithSearch(
       options.items,
       options.shouldShow ?? (() => true),
     )
-    const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
-    const onSelect = (item: { value: string; label: string; description?: string }): void => {
-      if (item.value === '__nomatch__') return // placeholder is not a pick
-      handle.hide()
-      resolve(item.value)
-    }
-    const onCancel = (): void => {
-      handle.hide()
-      resolve(undefined)
-    }
-    list.onSelect = onSelect
-    list.onCancel = onCancel
+    handle = tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
     tui.requestRender()
   })
 }

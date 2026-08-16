@@ -8,9 +8,11 @@ export class MockTerminal implements Terminal {
   output = ''
   width = 80
   height = 24
+  /** Captured raw-input callback; tests feed key bytes through it. */
+  onInput: ((data: string) => void) | undefined
 
-  start(): void {
-    // No-op.
+  start(onInput: (data: string) => void): void {
+    this.onInput = onInput
   }
 
   stop(): void {
