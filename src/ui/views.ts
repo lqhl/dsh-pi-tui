@@ -9,6 +9,7 @@ import {
   Markdown,
   Text,
   truncateToWidth,
+  visibleWidth,
   type Component,
 } from '@earendil-works/pi-tui'
 import type { ChatItem } from '../core/model.js'
@@ -137,8 +138,14 @@ export class ToolCardView implements Component {
       }
       return `${style.toolOk('✓')} ${style.toolName(tool.name)} ${style.toolArgs(tool.argsPreview)}`
     })()
-    const truncate = (line: string): string =>
-      line.length > inner ? `${line.slice(0, inner - 1)}…` : line
+    // Display-width-aware truncation: CJK glyphs occupy two columns, so
+    // plain string slicing lets lines overflow the terminal and trip
+    // pi-tui's width assertion.
+    const truncate = (line: string): string => {
+      const visible = visibleWidth(line)
+      if (visible <= inner) return line
+      return `${truncateToWidth(line, Math.max(0, inner - 1))}…`
+    }
     lines.push(`${border} ${truncate(statusLine)}`)
     if (tool.status !== 'running') {
       if (tool.resultPreview !== undefined && tool.resultPreview !== '') {
