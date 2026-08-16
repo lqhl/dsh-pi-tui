@@ -76,6 +76,5 @@ dsh 官方没有现成品牌资产（`dsh-brand` 只是 branded-id 工具，无�
 - 本地 /permission 已删除，官方命令接管（preset = 沙箱+审批捆绑切换）；
   状态栏权限段改读官方 `permissions` 投影；
 - 状态栏移到输入框下方（屏幕最底部，pi/CC 惯例）；
-- 启动 banner：品牌蓝 ASCII 鲸鱼 + 产品行 + 会话信息 + 键位提示，boot 与每次
-  会话切换时显示在 transcript 顶部；
+- 启动 banner：官方 DeepSeek logo 的半块字符像素化呈现（ImageMagick 降采样自动生成，非手绘）+ 产品行 + 会话信息 + 键位提示，boot 与每次会话切换时显示在 transcript 顶部；
 - 43 项单测 + PTY 冒烟（banner 渲染、官方 /permission 两种调用、布局顺序）通过。

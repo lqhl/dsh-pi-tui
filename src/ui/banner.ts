@@ -1,5 +1,6 @@
 /**
- * Startup banner: a hand-drawn ASCII whale in the pi brand blue, plus the
+ * Startup banner: the DeepSeek whale logo rendered as block characters
+ * (half-block rendition of the official logo, ~40 columns), plus the
  * product line, session facts, and one-line key hints. Shown on boot and on
  * every session switch.
  */
@@ -8,20 +9,19 @@ import chalk from 'chalk'
 const BLUE = chalk.hex('#4fc1ff')
 const MUTED = chalk.dim
 
-/** DeepSeek-whale silhouette (splash + body + tail), 40 columns wide. */
+/** Official DeepSeek logo, downsampled to half-block characters. */
 export const WHALE_ART = [
-  '            .',
-  "          .:'.",
-  "       .-'  ':'  '-.",
-  "     .'    : : :    '.",
-  '    /      : : :      \\',
-  '   |    o   : :   o    |',
-  '   |        : :        |',
-  "    \\       \\_/       /",
-  "     '._           _.'",
-  "        '-..__ __..-'",
-  "            '-..-'",
-  ' ~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^',
+  '        ▄▄▄▄▄▄▄▄▄▄███      ██▄',
+  '   ▄▄███████████████▄▄     █████▄▄▄▄▄███',
+  ' ▄██████████████████████▄  ▀██████████▀',
+  '███▀▀▀▀████████████████████▄▄█████▀▀',
+  '███        ▀▀█████████▄ ▀████████▀',
+  '███▄           ▀███████▄▄▄██████▀',
+  ' ████            ▀█████████████▀',
+  '  ▀████▄     ▄▄▄▄   ▀████████▀',
+  '    ▀▀████▄▄▄██████▄▄▄████████▄▄',
+  '       ▀▀▀████████████▀▀',
+  '        ~^~^~^~^~^~^~^~^~^~^~^~^~',
 ].join('\n')
 
 export interface BannerInfo {
