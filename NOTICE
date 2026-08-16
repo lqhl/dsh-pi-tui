@@ -18,5 +18,9 @@ Copyright (c) 2025 Mario Zechner) and retain that copyright:
 - `src/core/model.ts` — the event → render-model fold mirrors the channel
   state machine of the same interactive mode.
 
+- `src/ui/views.ts` — the colored unified-diff rendering adapts
+  `renderDiff` from
+  `packages/coding-agent/src/modes/interactive/components/diff.ts`.
+
 The pi repository's MIT license text is available at
 https://github.com/earendil-works/pi/blob/main/LICENSE.

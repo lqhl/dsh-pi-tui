@@ -16,6 +16,9 @@
  *   Ctrl+L     open the model picker
  *   Shift+Tab  cycle thinking effort
  */
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, relative } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import {
@@ -50,7 +53,7 @@ import {
   type ExitArm,
 } from '../core/keys.js'
 import { editorTheme, style } from './theme.js'
-import { createView, StatusBar, updateView, type StatusBarData } from './views.js'
+import { createView, StatusBar, ToolCardView, updateView, type StatusBarData } from './views.js'
 import { listAllModels, pickModel, type LlmRuntimeLike, type ModelRoute } from './model-picker.js'
 import { forkSession, listSessions, resolveAgent, type ResolvedAgent } from '../core/session.js'
 import { pickFromList, pickFromListWithSearch } from './overlays.js'
@@ -215,6 +218,18 @@ export class ChatScreen {
       }
       if (matchesKey(data, 'ctrl+l')) {
         void this.openModelPicker()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'ctrl+r')) {
+        void this.cmdHistorySearch()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'ctrl+z')) {
+        this.suspend()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'ctrl+g')) {
+        void this.externalEditor()
         return { consume: true }
       }
       if (matchesKey(data, 'shift+tab')) {
@@ -791,9 +806,13 @@ export class ChatScreen {
         '  Ctrl+C     running→interrupt · text→clear · empty→again exits',
         '  Ctrl+D     exit when the editor is empty',
         '  Ctrl+T     toggle thinking display',
-        '  Ctrl+O     toggle full tool output',
+        '  Ctrl+O     toggle full tool output / diff',
         '  Ctrl+L     model picker · Shift+Tab cycle thinking',
+        '  Ctrl+R     search message history',
+        '  Ctrl+Z     suspend to background',
+        '  Ctrl+G     edit input in $EDITOR',
         '  Tab        complete paths · / slash commands · @ attach files',
+        'commands: /new /fork /resume /tree /model /thinking /skills /agents /jobs /export /rename /hotkeys',
       ].join('\n'),
     )
   }
@@ -1036,7 +1055,97 @@ export class ChatScreen {
   /** Fold one session event and reconcile the component tree. */
   handleEvent(event: SessionEvent): void {
     applyEvent(this.model, event)
+    if (event.type === 'tool/result') void this.resolveImages(event)
     this.sync()
+  }
+
+  /**
+   * Resolve image-attachment refs from read_image results into inline
+   * base64 for the tool card (best effort; the text envelope still shows).
+   */
+  private async resolveImages(event: SessionEvent): Promise<void> {
+    const callId = (event.data as { message?: { source?: { callId?: string } } }).message
+      ?.source?.callId
+    if (callId === undefined) return
+    const card = this.model.items.find(
+      (item) => item.kind === 'tool' && item.tool?.callId === callId,
+    )
+    if (card === undefined || card.tool?.imageRefs === undefined) return
+    const attachments = this.ctx.get('attachments') as
+      | { readImage(ref: unknown, signal?: AbortSignal): Promise<{ data: Uint8Array }> }
+      | undefined
+    if (attachments === undefined) return
+    const images: { base64: string; mediaType: string }[] = []
+    for (const ref of card.tool.imageRefs) {
+      try {
+        const stored = await attachments.readImage(ref)
+        images.push({
+          base64: Buffer.from(stored.data).toString('base64'),
+          mediaType: ref.mediaType,
+        })
+      } catch {
+        // Resolution is best effort.
+      }
+    }
+    if (images.length === 0) return
+    const view = this.views.get(card.id)
+    if (view instanceof ToolCardView) {
+      view.setImages(images)
+      this.sync()
+    }
+  }
+
+  /** Ctrl+Z: stop the renderer, suspend the process, redraw on SIGCONT. */
+  private suspend(): void {
+    this.tui.stop()
+    process.once('SIGCONT', () => {
+      this.tui.start()
+      this.tui.setFocus(this.editor)
+      this.tui.requestRender()
+    })
+    process.kill(process.pid, 'SIGTSTP')
+  }
+
+  /** Ctrl+G: edit the input in $EDITOR/$VISUAL (user full authority). */
+  private async externalEditor(): Promise<void> {
+    if (this.isBusy()) {
+      this.pushNotice('cannot open the editor while work is running', 'error')
+      return
+    }
+    const editor = process.env.VISUAL ?? process.env.EDITOR
+    if (editor === undefined || editor === '') {
+      this.pushNotice('set $EDITOR (or $VISUAL) to use the external editor', 'error')
+      return
+    }
+    const shell = this.ctx.get('shell') as
+      | { run(req: unknown): Promise<{ exitCode: number | null }> }
+      | undefined
+    if (shell === undefined) {
+      this.pushNotice('shell service unavailable', 'error')
+      return
+    }
+    const tmp = join(tmpdir(), `dsh-pi-tui-${Date.now()}.md`)
+    await writeFile(tmp, this.editor.getText(), 'utf8')
+    this.tui.stop()
+    try {
+      await shell.run({
+        command: `${editor} ${JSON.stringify(tmp)}`,
+        workdir: this.cwd,
+        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: this.cwd },
+        timeoutMs: 30 * 60 * 1000,
+      })
+      const text = await readFile(tmp, 'utf8')
+      this.editor.setText(text)
+    } finally {
+      try {
+        await rm(tmp, { force: true })
+      } catch {
+        // Best effort.
+      }
+      this.tui.start()
+      this.tui.setFocus(this.editor)
+      this.tui.requestRender()
+    }
   }
 
   /** Create views for new items, refresh changed ones, fix the chrome. */
@@ -1149,6 +1258,39 @@ export class ChatScreen {
     }
     this.statusBar.update(status)
     this.tui.requestRender()
+  }
+
+  /** Fuzzy search over the transcript; picking a message loads it into the
+   * editor for re-sending or editing. */
+  private async cmdHistorySearch(): Promise<void> {
+    const entries = this.model.items
+      .filter((item) => item.kind === 'user' || item.kind === 'assistant')
+      .map((item) => ({
+        id: String(item.id),
+        text: item.text,
+        label: `${item.kind === 'user' ? '❯ ' : ''}${item.text.replace(/\s+/g, ' ').slice(0, 90)}`,
+        kind: item.kind,
+      }))
+    if (entries.length === 0) {
+      this.pushNotice('no messages yet')
+      return
+    }
+    const picked = await pickFromListWithSearch(this.tui, {
+      title: 'Search history',
+      items: entries.map((entry) => ({
+        value: entry.id,
+        label: entry.label,
+        description: entry.kind,
+      })),
+    })
+    if (picked !== undefined) {
+      const entry = entries.find((candidate) => candidate.id === picked)
+      if (entry !== undefined) {
+        this.editor.setText(entry.text)
+        this.tui.setFocus(this.editor)
+        this.tui.requestRender()
+      }
+    }
   }
 
   private async openModelPicker(): Promise<void> {

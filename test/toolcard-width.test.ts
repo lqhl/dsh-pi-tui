@@ -73,3 +73,65 @@ function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
 }
+
+test('diff rendering stays within width (CJK + ANSI)', async () => {
+  const terminal = new MockTerminal()
+  terminal.width = 40
+  const tui = new TuiMainScreen(terminal)
+  const item: ChatItem = {
+    id: 0,
+    kind: 'tool',
+    text: '',
+    streaming: false,
+    tool: {
+      callId: 'c1',
+      name: 'edit',
+      argsPreview: '{}',
+      status: 'ok',
+      diffs: [
+        { path: 'wiki/OSDI.md', oldText: '旧的内容第一行\n第二行', newText: '新的内容第一行很长很长很长很长\n第二行' },
+      ],
+    },
+  }
+  const view: Component = new ToolCardView(item)
+  view.updateFromItem(true)
+  tui.addChild(view)
+  tui.start()
+  tui.requestRender()
+  await tick()
+  const output = stripAnsi(terminal.output)
+  assert.ok(output.includes('+ 新的内容'), 'diff added lines should render')
+  for (const line of output.split('\n')) {
+    if (line.trim() === '') continue
+    assert.ok(visibleWidth(line) <= terminal.width, `line exceeds width: ${line}`)
+  }
+  tui.stop()
+})
+
+test('image capability fallback renders a text note, no crash', async () => {
+  const terminal = new MockTerminal()
+  terminal.width = 60
+  const tui = new TuiMainScreen(terminal)
+  const item: ChatItem = {
+    id: 0,
+    kind: 'tool',
+    text: '',
+    streaming: false,
+    tool: { callId: 'c1', name: 'read_image', argsPreview: '{}', status: 'ok', resultPreview: 'image 100x50' },
+  }
+  const view = new ToolCardView(item)
+  view.setImages([{ base64: 'aGVsbG8=', mediaType: 'image/png' }])
+  view.updateFromItem(true)
+  tui.addChild(view)
+  tui.start()
+  tui.requestRender()
+  await tick()
+  const output = stripAnsi(terminal.output)
+  // The mock terminal has no image capability: expect the note or nothing,
+  // but never a crash / oversized line.
+  for (const line of output.split('\n')) {
+    if (line.trim() === '') continue
+    assert.ok(visibleWidth(line) <= terminal.width, `line exceeds width: ${line}`)
+  }
+  tui.stop()
+})

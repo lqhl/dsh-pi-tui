@@ -15,9 +15,18 @@ import type {
   AskUserQuestionItem,
   AskUserQuestionRequest,
 } from '@deepseek-ai/dsh-user-questions'
-import { Container, Input, SelectList, Text, fuzzyFilter, matchesKey, type TUI } from '@earendil-works/pi-tui'
+import {
+  Container,
+  Input,
+  Markdown,
+  SelectList,
+  Text,
+  fuzzyFilter,
+  matchesKey,
+  type TUI,
+} from '@earendil-works/pi-tui'
 import { RG_DISPLAY_CAP } from '../core/files.js'
-import { selectListTheme, style } from './theme.js'
+import { markdownTheme, selectListTheme, style } from './theme.js'
 
 /** Content root forwarding input to a SelectList child. */
 class ListPanel extends Container {
@@ -344,19 +353,31 @@ function optionsStep(
   const options = question.options ?? []
   const multi = question.multiSelect === true
   const selected: string[] = []
+  // Plan-review intent: approve option first, plan markdown as the body.
+  const approveLabel =
+    question.intent?.kind === 'plan-review' ? question.intent.approve : undefined
+  const ordered =
+    approveLabel !== undefined
+      ? [
+          ...options.filter((option) => option.label === approveLabel),
+          ...options.filter((option) => option.label !== approveLabel),
+        ]
+      : options
 
   const buildItems = () => [
     ...(multi ? [{ value: '__done__', label: selected.length > 0 ? '✓ Done' : 'Done' }] : []),
-    ...options.map((option) => ({
+    ...ordered.map((option) => ({
       value: option.label,
       label: `${selected.includes(option.label) ? '✓ ' : '  '}${option.label}`,
       description: option.description,
     })),
   ]
 
-  const list = new SelectList(buildItems(), Math.min(12, Math.max(2, options.length + 1)), selectListTheme)
-  const panel = new ListPanel(question.question, multi ? `${body}\n(multi-select: pick items, then Done)` : body, list)
-  const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '60%' })
+  const list = new SelectList(buildItems(), Math.min(12, Math.max(2, ordered.length + 1)), selectListTheme)
+  const panel = approveLabel !== undefined
+    ? new PlanReviewPanel(question.detail ?? '', list)
+    : new ListPanel(question.question, multi ? `${body}\n(multi-select: pick items, then Done)` : body, list)
+  const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
 
   list.onSelect = (picked) => {
     if (picked.value === '__done__') {
@@ -369,7 +390,7 @@ function optionsStep(
     }
     if (!selected.includes(picked.value)) selected.push(picked.value)
     // Rebuild the list in place with updated check marks.
-    const rebuilt = new SelectList(buildItems(), Math.min(12, Math.max(2, options.length + 1)), selectListTheme)
+    const rebuilt = new SelectList(buildItems(), Math.min(12, Math.max(2, ordered.length + 1)), selectListTheme)
     rebuilt.onSelect = list.onSelect
     rebuilt.onCancel = list.onCancel
     panel.replaceList(rebuilt)
@@ -377,6 +398,29 @@ function optionsStep(
   }
   list.onCancel = () => finish(undefined)
   return handle
+}
+
+/**
+ * Plan-review overlay: the plan renders as markdown above the decision list,
+ * with the approve option first (AskUserQuestionIntent['plan-review']).
+ */
+class PlanReviewPanel extends Container {
+  constructor(planMarkdown: string, list: SelectList) {
+    super()
+    this.addChild(new Text(style.accent('Plan review — approve to proceed'), 1, 0))
+    this.addChild(new Markdown(planMarkdown, 1, 0, markdownTheme))
+    this.addChild(list)
+  }
+
+  handleInput(data: string): void {
+    // Forward to the (single) SelectList child.
+    const list = this.children.at(-1)
+    if (list instanceof SelectList) list.handleInput(data)
+  }
+
+  replaceList(list: SelectList): void {
+    this.children[this.children.length - 1] = list
+  }
 }
 
 /** Free-text step: single-line Input, Enter submits, Escape skips. */

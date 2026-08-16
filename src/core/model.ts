@@ -20,6 +20,27 @@ export interface ToolCardState {
   /** Untruncated result, rendered when the user expands tool output. */
   resultFull?: string
   errorText?: string
+  /** Result-time file diffs from tool meta (dsh-tool-fs), for /Ctrl+O view. */
+  diffs?: FileDiff[]
+  /** Durable image-attachment refs from image content blocks (read_image). */
+  imageRefs?: ImageAttachmentRef[]
+}
+
+/** Serializable image-attachment reference from a tool result's image block. */
+export interface ImageAttachmentRef {
+  attachmentId: string
+  mediaType: string
+  bytes: number
+  width: number
+  height: number
+  name?: string
+}
+
+/** One file change carried by a tool result's `meta.diffs`. */
+export interface FileDiff {
+  path: string
+  oldText: string | null
+  newText: string
 }
 
 export interface ChatItem {
@@ -61,6 +82,16 @@ export function textOf(content: readonly ContentBlock[] | undefined): string {
     .map((block) => (block.type === 'text' ? block.text : ''))
     .join('')
     .trim()
+}
+
+function isFileDiff(value: unknown): value is FileDiff {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as { path?: unknown; oldText?: unknown; newText?: unknown }
+  return (
+    typeof record.path === 'string' &&
+    (record.oldText === null || typeof record.oldText === 'string') &&
+    typeof record.newText === 'string'
+  )
 }
 
 function preview(text: string, limit: number): string {
@@ -170,6 +201,22 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
         if (result) {
           card.tool.resultPreview = preview(result, RESULT_PREVIEW_LIMIT)
           card.tool.resultFull = result
+        }
+        const imageRefs = event.data.message.content
+          .flatMap((block) => (block.type === 'tool-result' ? block.content : []))
+          .filter((block) => block.type === 'image')
+          .map((block) => {
+            const attachment = (block as unknown as { attachment?: unknown }).attachment as
+              | ImageAttachmentRef
+              | undefined
+            return attachment
+          })
+          .filter((ref): ref is ImageAttachmentRef => ref !== undefined && typeof ref.attachmentId === 'string')
+        if (imageRefs.length > 0) card.tool.imageRefs = imageRefs
+        const meta = event.data.meta as { diffs?: unknown } | undefined
+        if (meta !== undefined && Array.isArray(meta.diffs)) {
+          const diffs = meta.diffs.filter(isFileDiff)
+          if (diffs.length > 0) card.tool.diffs = diffs
         }
       }
       break

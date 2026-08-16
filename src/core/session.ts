@@ -88,7 +88,11 @@ export async function resolveAgent(
     const existing = ctx.agents.get(resumeId)
     if (existing !== undefined) return { agent: existing }
     try {
-      const composition = await composeSetup(ctx, await persistedPreset(ctx, requestedSessionId))
+      // Only mount a preset composition when the persisted session records
+      // one — a failed probe must not silently re-compose a preset-less
+      // session under the default.
+      const sessionPreset = await persistedPreset(ctx, requestedSessionId)
+      const composition = sessionPreset !== undefined ? await composeSetup(ctx, sessionPreset) : {}
       const resumed = await ctx.agents.resume({
         resumeSessionId: resumeId,
         agentOptions,

@@ -3,11 +3,14 @@
  * Each view holds its ChatItem and refreshes from it on `updateFromItem()`;
  * rendering is stateless so `invalidate()` is a no-op.
  */
+import { diffLines } from 'diff'
 import chalk from 'chalk'
 import {
   Container,
+  Image,
   Markdown,
   Text,
+  getCapabilities,
   truncateToWidth,
   visibleWidth,
   type Component,
@@ -114,6 +117,7 @@ export class ToolCardView implements Component {
   private item: ChatItem
   private lastRender: string | undefined
   private expand = false
+  private images: { base64: string; mediaType: string }[] = []
 
   constructor(item: ChatItem) {
     this.item = item
@@ -121,6 +125,11 @@ export class ToolCardView implements Component {
 
   updateFromItem(expand: boolean): void {
     this.expand = expand
+  }
+
+  /** Resolved inline images (filled by the screen after read_image results). */
+  setImages(images: { base64: string; mediaType: string }[]): void {
+    this.images = images
   }
 
   render(width: number): string[] {
@@ -148,7 +157,11 @@ export class ToolCardView implements Component {
     }
     lines.push(`${border} ${truncate(statusLine)}`)
     if (tool.status !== 'running') {
-      if (tool.resultPreview !== undefined && tool.resultPreview !== '') {
+      // Expanded view with result-time diffs (write/edit tools) renders a
+      // colored unified diff instead of the raw result text.
+      if (this.expand && tool.diffs !== undefined && tool.diffs.length > 0) {
+        lines.push(...this.renderDiffLines(border, truncate))
+      } else if (tool.resultPreview !== undefined && tool.resultPreview !== '') {
         const body = this.expand && tool.resultFull !== undefined && tool.resultFull !== ''
           ? tool.resultFull
           : tool.resultPreview
@@ -160,7 +173,59 @@ export class ToolCardView implements Component {
         }
       }
     }
+    // Inline images (read_image results) render in the expanded view when
+    // the terminal speaks kitty/iTerm2 graphics; otherwise a text note.
+    if (this.expand && this.images.length > 0) {
+      const capabilities = getCapabilities()
+      if (capabilities.images !== null) {
+        for (const image of this.images) {
+          const component = new Image(image.base64, image.mediaType, {
+            fallbackColor: (text) => chalk.dim(text),
+          }, { maxWidthCells: Math.max(10, inner - 2) })
+          for (const line of component.render(width)) {
+            lines.push(`${border} ${line}`)
+          }
+        }
+      } else {
+        lines.push(`${border} ${truncate(chalk.dim(`(image: ${this.images.map((image) => image.mediaType).join(', ')} — run in a kitty/iTerm2 terminal to view inline)`))}`)
+      }
+    }
     this.lastRender = lines.join('\n')
+    return lines
+  }
+
+  /** Colored unified diff per changed file (adapts pi's diff rendering). */
+  private renderDiffLines(
+    border: string,
+    truncate: (line: string) => string,
+  ): string[] {
+    const lines: string[] = []
+    for (const file of this.item.tool?.diffs ?? []) {
+      lines.push(`${border} ${style.toolName(file.path)}`)
+      const MAX = 80
+      if (file.oldText === null) {
+        // New file: every line added.
+        for (const line of file.newText.split('\n').slice(0, MAX)) {
+          lines.push(`${border} ${truncate(chalk.green(`+ ${line}`))}`)
+        }
+        continue
+      }
+      const parts = diffLines(file.oldText, file.newText)
+      let count = 0
+      for (const part of parts) {
+        for (const line of part.value.replace(/\n$/, '').split('\n')) {
+          if (count++ >= MAX) break
+          const prefix = part.added ? '+ ' : part.removed ? '- ' : '  '
+          const styled = part.added
+            ? chalk.green(prefix + line)
+            : part.removed
+              ? chalk.red(prefix + line)
+              : chalk.dim(prefix + line)
+          lines.push(`${border} ${truncate(styled)}`)
+        }
+        if (count >= MAX) break
+      }
+    }
     return lines
   }
 
