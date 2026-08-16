@@ -40,14 +40,37 @@ test('status bar composes plan/goal/context/preset/jobs fields', async () => {
   assert.ok(visibleWidth(bar.render(terminal.width)[0]) <= terminal.width)
 })
 
-test('status bar hides absent optional segments', async () => {
+test('status bar shows normal mode and hides absent optional segments', async () => {
   const terminal = new MockTerminal()
   terminal.width = 200
   const bar = new StatusBar()
   bar.update({ model: 'deepseek-v4-flash', sessionId: 'abc12345-xxxx', cwd: 'repo' })
   const output = stripAnsi(bar.render(terminal.width)[0])
+  assert.ok(output.includes('normal'))
   assert.ok(!output.includes('⌘plan'))
   assert.ok(!output.includes('◈'))
   assert.ok(!output.includes('ctx '))
   assert.ok(!output.includes('⚙'))
+})
+
+test('status bar renders sandbox mode and context bar with totals', async () => {
+  const terminal = new MockTerminal()
+  terminal.width = 240
+  const bar = new StatusBar()
+  bar.update({
+    model: 'deepseek-v4-flash',
+    sessionId: 'abc12345-xxxx',
+    cwd: 'repo',
+    planActive: true,
+    sandboxMode: 'danger-full-access',
+    contextPct: 45,
+    contextUsed: 12000,
+    contextTotal: 27000,
+  })
+  const output = stripAnsi(bar.render(terminal.width)[0])
+  assert.ok(output.includes('⌘plan'))
+  assert.ok(output.includes('danger'))
+  assert.ok(output.includes('45%'))
+  assert.ok(output.includes('12k/27k'))
+  assert.ok(visibleWidth(bar.render(terminal.width)[0]) <= terminal.width)
 })

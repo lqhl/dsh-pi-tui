@@ -32,7 +32,8 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 | `↑` / `↓` | 浏览当前会话的消息历史（恢复/切换后自动载入） |
 | `Ctrl+Z` | 挂起到后台（`fg` 恢复） |
 | `Ctrl+G` | 用 `$EDITOR` 编辑输入 |
-| `Shift+Tab` | 循环思考强度（off→high→max） |
+| `Shift+Tab` | 循环会话 mode（normal ↔ plan） |
+| `Ctrl+X` | 循环思考强度（off→high→max） |
 | `Tab` | 补全（slash 命令 / 路径型 token；普通单词不触发） |
 | `@` | 文件提及菜单（搜索框 fuzzy 过滤，选中即插入） |
 | `!` / `!!` | 直接执行 shell 命令（用户全权；`!!` 输出不进模型上下文） |
@@ -52,6 +53,7 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 | `/jobs` | 列出后台任务 |
 | `/export` | 导出 transcript 为 markdown |
 | `/rename <title>` | 重命名会话（官方 sessionTitle 服务） |
+| `/permission <ws\|ro\|danger>` | 切换沙箱模式（danger 需确认） |
 | `/hotkeys` | 显示键位表 |
 | `/compact` `/goal` `/plan` `/feedback` | 官方 dsh 命令（自动发现） |
 

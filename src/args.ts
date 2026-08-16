@@ -68,8 +68,8 @@ Keys:
   Ctrl+D     exit when the editor is empty
   Ctrl+T     toggle thinking display
   Ctrl+O     toggle full tool output
-  Ctrl+L     model picker · Shift+Tab cycle thinking
-  Ctrl+R     search message history
+  Ctrl+L     model picker · Ctrl+X cycle thinking
+  Ctrl+R     search message history · Shift+Tab cycle mode
   Ctrl+Z     suspend to background
   Tab        complete paths · / slash commands · @ attach files
 
@@ -84,5 +84,6 @@ Commands:
   /agents                 list live subagents
   /jobs                   list background jobs
   /export                 write this transcript to a markdown file
+  /permission <ws|ro|danger>  switch sandbox mode
   /hotkeys                this key table
   /compact /goal /plan /feedback   official dsh commands`

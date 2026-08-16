@@ -52,6 +52,7 @@ import {
   parseSlash,
   type ExitArm,
 } from '../core/keys.js'
+import { contextPctOf } from '../core/format.js'
 import { editorTheme, style } from './theme.js'
 import { createView, StatusBar, ToolCardView, updateView, type StatusBarData } from './views.js'
 import { listAllModels, pickModel, type LlmRuntimeLike, type ModelRoute } from './model-picker.js'
@@ -143,6 +144,7 @@ export class ChatScreen {
       { name: 'jobs', description: 'List background jobs' },
       { name: 'export', description: 'Write this transcript to a markdown file' },
       { name: 'rename', description: 'Rename this session' },
+      { name: 'permission', description: 'Switch sandbox mode (ws/ro/danger)' },
       { name: 'hotkeys', description: 'Show key bindings' },
     ]
     this.editor.setAutocompleteProvider(
@@ -233,6 +235,10 @@ export class ChatScreen {
         return { consume: true }
       }
       if (matchesKey(data, 'shift+tab')) {
+        void this.cycleMode()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'ctrl+x')) {
         void this.cycleThinking()
         return { consume: true }
       }
@@ -569,6 +575,7 @@ export class ChatScreen {
     if (parsed.name === 'jobs') return this.cmdJobs()
     if (parsed.name === 'export') return this.cmdExport()
     if (parsed.name === 'rename') return this.cmdRename(parsed.raw.trim())
+    if (parsed.name === 'permission') return this.cmdPermission(parsed.raw.trim())
     if (parsed.name === 'hotkeys') return this.cmdHotkeys()
 
     if (this.commands !== undefined) {
@@ -717,6 +724,71 @@ export class ChatScreen {
     if (next !== undefined) await this.cmdThinking(next)
   }
 
+  /** Shift+Tab: cycle the session mode (normal ↔ plan), CC semantics. */
+  private async cycleMode(): Promise<void> {
+    if (this.commands === undefined) {
+      this.pushNotice('command registry unavailable', 'error')
+      return
+    }
+    const plan = this.planState()
+    const line = plan ? '/plan off' : '/plan'
+    try {
+      await this.commands.execute(this.agent, line, new AbortController().signal)
+    } catch (error) {
+      this.pushNotice(`mode switch failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
+
+  /** Plan-mode state from the projection (active, or pending-on). */
+  private planState(): boolean {
+    try {
+      const projections = this.ctx.get('sessionProjections') as
+        | { snapshot(session: unknown): { values: Record<string, unknown> } }
+        | undefined
+      const plan = projections?.snapshot(this.agent.session).values?.plan as
+        | { active?: boolean; wanted?: boolean | null }
+        | undefined
+      return plan?.active === true || plan?.wanted === true
+    } catch {
+      return false
+    }
+  }
+
+  /** /permission <ws|ro|danger>: switch the session sandbox mode. */
+  private async cmdPermission(raw: string): Promise<void> {
+    const MODES: Record<string, string> = {
+      ws: 'workspace-write',
+      'ws-write': 'workspace-write',
+      ro: 'read-only',
+      'read-only': 'read-only',
+      danger: 'danger-full-access',
+      'danger-full-access': 'danger-full-access',
+    }
+    const mode = MODES[raw]
+    if (mode === undefined) {
+      this.pushNotice('usage: /permission <ws|ro|danger>', 'error')
+      return
+    }
+    if (mode === 'danger-full-access') {
+      const picked = await pickFromList(this.tui, {
+        title: 'Switch to danger-full-access?',
+        body: 'every shell/fs call runs without confinement for this session',
+        items: [
+          { value: 'yes', label: '✓ Switch' },
+          { value: 'no', label: '✗ Cancel' },
+        ],
+      })
+      if (picked !== 'yes') return
+    }
+    try {
+      const { setSandboxMode } = await import('@deepseek-ai/dsh-sandbox-policy')
+      setSandboxMode(this.agent.session, mode as never)
+      this.pushNotice(`permission → ${mode}`)
+    } catch (error) {
+      this.pushNotice(`permission switch failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
+
   private async cmdSkills(): Promise<void> {
     const skills = await this.listSkills()
     if (skills.length === 0) {
@@ -822,8 +894,8 @@ export class ChatScreen {
         '  Ctrl+D     exit when the editor is empty',
         '  Ctrl+T     toggle thinking display',
         '  Ctrl+O     toggle full tool output / diff',
-        '  Ctrl+L     model picker · Shift+Tab cycle thinking',
-        '  Ctrl+R     search message history',
+        '  Ctrl+L     model picker · Ctrl+X cycle thinking',
+        '  Ctrl+R     search message history · Shift+Tab cycle mode',
         '  Ctrl+Z     suspend to background',
         '  Ctrl+G     edit input in $EDITOR',
         '  Tab        complete paths · / slash commands · @ attach files',
@@ -1203,6 +1275,8 @@ export class ChatScreen {
     let planActive: boolean | undefined
     let goalPhase: string | undefined
     let contextPct: number | undefined
+    let contextUsed: number | undefined
+    let contextTotal: number | undefined
     try {
       const projections = this.ctx.get('sessionProjections') as
         | { snapshot(session: unknown): { values: Record<string, unknown> } }
@@ -1231,11 +1305,11 @@ export class ChatScreen {
       const pressure = values?.contextPressure as
         | { pressureTokens?: number; projectedTokens?: number; contextWindow?: number }
         | undefined
+      contextPct = contextPctOf(pressure)
       if (pressure?.contextWindow !== undefined && pressure.contextWindow > 0) {
-        const pressureTokens = pressure.projectedTokens ?? pressure.pressureTokens
-        if (pressureTokens !== undefined) {
-          contextPct = Math.min(100, Math.round((100 * pressureTokens) / pressure.contextWindow))
-        }
+        contextTotal = pressure.contextWindow
+        const used = pressure.projectedTokens ?? pressure.pressureTokens
+        if (used !== undefined) contextUsed = used
       }
     } catch {
       // Projections are an optional capability; the folded counters suffice.
@@ -1256,6 +1330,17 @@ export class ChatScreen {
       // Jobs are optional.
     }
 
+    // Resolved per-session sandbox mode (session override > deployment).
+    let sandboxMode: string | undefined
+    try {
+      const policy = this.ctx.get('sandboxPolicy') as
+        | { resolve(request?: { session?: unknown }): { mode: string } }
+        | undefined
+      sandboxMode = policy?.resolve({ session: this.agent.session }).mode
+    } catch {
+      // Optional service.
+    }
+
     const route = this.currentRoute()
     const effort = this.currentEffort()
     const status: StatusBarData = {
@@ -1269,6 +1354,9 @@ export class ChatScreen {
       planActive,
       goalPhase,
       contextPct,
+      contextUsed,
+      contextTotal,
+      sandboxMode,
       jobsRunning,
     }
     this.statusBar.update(status)

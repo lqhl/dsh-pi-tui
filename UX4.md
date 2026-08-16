@@ -64,3 +64,12 @@ ctx ▓▓▓▓▓▓░░░░ 45% 12k/27k · in 4.2k out 343 · ☐ 2/5 · 
 2. thinking effort 循环改到 **Ctrl+X** 是否接受？
 3. 状态栏新增段的顺序/缩略格式（`ws-write`、`ctx ▓▓… 45% 12k/27k`）？
 4. `/permission` 命令是否要（danger 切换走审批弹窗确认）？
+
+
+## 状态：✅ 已实现（2026-08-16）
+
+- Shift+Tab 循环 normal ↔ plan（走官方命令注册表）；thinking effort 循环移至 Ctrl+X；
+- 状态栏：显式 `normal`/`⌘plan` 模式段、权限段（`ws-write`/`read-only`/`danger`）、
+  context 10 格迷你条 + `45%` + `12k/27k` 总量、in/out 缩写（k/M）；
+- `/permission <ws|ro|danger>`：danger 切换带确认弹窗；
+- 43 项单测 + PTY 冒烟全部通过。

@@ -17,6 +17,7 @@ import {
 } from '@earendil-works/pi-tui'
 import type { ChatItem } from '../core/model.js'
 import { markdownTheme, reasoningMarkdownTheme, style } from './theme.js'
+import { renderContextBar, sandboxShort, shortTokens } from '../core/format.js'
 
 /** Collapsed reasoning label; expanded/streaming renders the markdown body. */
 export class ReasoningView extends Container {
@@ -249,6 +250,9 @@ export interface StatusBarData {
   planActive?: boolean
   goalPhase?: string
   contextPct?: number
+  contextUsed?: number
+  contextTotal?: number
+  sandboxMode?: string
   jobsRunning?: number
 }
 
@@ -264,14 +268,24 @@ export class StatusBar implements Component {
     const parts: string[] = ['dsh-pi-tui']
     if (data.model !== undefined) parts.push(data.model)
     if (data.preset !== undefined) parts.push(data.preset)
-    if (data.planActive === true) parts.push('⌘plan')
+    // Explicit mode indicator: plan when active, normal otherwise.
+    parts.push(data.planActive === true ? '⌘plan' : 'normal')
+    const modeShort = sandboxShort(data.sandboxMode)
+    if (modeShort !== undefined) parts.push(modeShort)
     if (data.goalPhase !== undefined) parts.push(`◈${data.goalPhase}`)
     if (data.sessionId !== undefined) parts.push(data.sessionId.slice(0, 8))
     if (data.cwd !== undefined) parts.push(data.cwd)
     if (data.tokens !== undefined) {
-      parts.push(`in ${data.tokens.input} out ${data.tokens.output}`)
+      parts.push(`in ${shortTokens(data.tokens.input)} out ${shortTokens(data.tokens.output)}`)
     }
-    if (data.contextPct !== undefined) parts.push(`ctx ${data.contextPct}%`)
+    if (data.contextPct !== undefined) {
+      const bar = renderContextBar(data.contextUsed, data.contextTotal)
+      const totals =
+        data.contextUsed !== undefined && data.contextTotal !== undefined
+          ? ` ${shortTokens(data.contextUsed)}/${shortTokens(data.contextTotal)}`
+          : ''
+      parts.push(`ctx ${bar !== undefined ? `${bar} ` : ''}${data.contextPct}%${totals}`)
+    }
     if (data.todos !== undefined && data.todos.total > 0) {
       parts.push(`☐ ${data.todos.done}/${data.todos.total}`)
     }
