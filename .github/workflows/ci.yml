@@ -40,4 +40,14 @@ jobs:
           registry-url: https://registry.npmjs.org/
       - run: npm ci
       - run: npm run build
+      # The published version comes from package.json, not the tag name;
+      # fail early when they drift (otherwise npm rejects the publish).
+      - name: Verify tag matches package.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag '$GITHUB_REF_NAME' does not match package.json version '$version'"
+            exit 1
+          fi
       - run: npm publish --provenance --access public
