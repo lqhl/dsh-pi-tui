@@ -15,15 +15,8 @@ import type {
   AskUserQuestionItem,
   AskUserQuestionRequest,
 } from '@deepseek-ai/dsh-user-questions'
-import {
-  Container,
-  Input,
-  SelectList,
-  Text,
-  fuzzyFilter,
-  matchesKey,
-  type TUI,
-} from '@earendil-works/pi-tui'
+import { Container, Input, SelectList, Text, fuzzyFilter, matchesKey, type TUI } from '@earendil-works/pi-tui'
+import { RG_DISPLAY_CAP } from '../core/files.js'
 import { selectListTheme, style } from './theme.js'
 
 /** Content root forwarding input to a SelectList child. */
@@ -108,7 +101,8 @@ export function pickFromList(
 /**
  * Search-capable single-choice overlay: an Input above the list live-filters
  * items with fuzzy scoring (the pi ModelSelector pattern). Enter picks the
- * top match; Esc cancels.
+ * top match; Esc cancels. `shouldShow` gates per-item visibility (e.g. the
+ * hidden-file policy); `footerTotal` feeds the count line.
  */
 export function pickFromListWithSearch(
   tui: TUI,
@@ -116,12 +110,20 @@ export function pickFromListWithSearch(
     title: string
     body?: string
     items: ListPickItem[]
+    shouldShow?: (query: string, item: ListPickItem) => boolean
   },
 ): Promise<string | undefined> {
   return new Promise((resolve) => {
     const search = new Input()
     const list = new SelectList(options.items, Math.min(12, Math.max(2, options.items.length)), selectListTheme)
-    const panel = new SearchPanel(options.title, options.body, search, list, options.items)
+    const panel = new SearchPanel(
+      options.title,
+      options.body,
+      search,
+      list,
+      options.items,
+      options.shouldShow ?? (() => true),
+    )
     const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
     const onSelect = (item: { value: string; label: string; description?: string }): void => {
       if (item.value === '__nomatch__') return // placeholder is not a pick
@@ -144,7 +146,10 @@ export function pickFromListWithSearch(
  */
 class SearchPanel extends Container {
   private readonly allItems: ListPickItem[]
+  private readonly shouldShow: (query: string, item: ListPickItem) => boolean
   private list: SelectList
+  private readonly listChildIndex: number
+  private readonly footer: Text
 
   constructor(
     title: string,
@@ -152,10 +157,13 @@ class SearchPanel extends Container {
     private readonly search: Input,
     list: SelectList,
     allItems: ListPickItem[],
+    shouldShow: (query: string, item: ListPickItem) => boolean,
   ) {
     super()
     this.list = list
     this.allItems = allItems
+    this.shouldShow = shouldShow
+    this.footer = new Text('', 1, 0)
     this.addChild(new Text(style.accent(title), 1, 0))
     if (body !== undefined && body !== '') {
       for (const line of body.split('\n')) {
@@ -164,6 +172,9 @@ class SearchPanel extends Container {
     }
     this.addChild(this.search)
     this.addChild(this.list)
+    this.listChildIndex = this.children.length - 1
+    this.addChild(this.footer)
+    this.refilter()
   }
 
   handleInput(data: string): void {
@@ -186,20 +197,21 @@ class SearchPanel extends Container {
 
   private refilter(): void {
     const query = this.search.getValue().trim()
+    const visible = this.allItems.filter((item) => this.shouldShow(query, item))
     let filtered: ListPickItem[]
     if (query === '') {
-      filtered = this.allItems
+      filtered = visible
     } else {
       // Two tiers, mirroring pi's filename-weighted fd scoring: basename
       // matches first (the user types filenames, not paths), then full-path
       // matches appended only when the basename tier is thin.
-      const byBasename = fuzzyFilter(this.allItems, query, (item) =>
+      const byBasename = fuzzyFilter(visible, query, (item) =>
         item.label.split('/').at(-1) ?? item.label,
       )
       if (byBasename.length >= 8) {
         filtered = byBasename
       } else {
-        const rest = this.allItems.filter((item) => !byBasename.includes(item))
+        const rest = visible.filter((item) => !byBasename.includes(item))
         filtered = [...byBasename, ...fuzzyFilter(rest, query, (item) => item.label)]
       }
     }
@@ -209,12 +221,23 @@ class SearchPanel extends Container {
       filtered = [
         { value: '__nomatch__', label: 'no matches', description: 'keep typing or Esc' },
       ]
+      this.footer.setText('')
+    } else {
+      // The full list lives in memory; the render is capped and the footer
+      // tells the user how much is left to narrow down.
+      const shown = filtered.slice(0, RG_DISPLAY_CAP)
+      this.footer.setText(
+        filtered.length > RG_DISPLAY_CAP
+          ? style.statusBar(`showing ${shown.length} of ${filtered.length} — type to filter`)
+          : style.statusBar(`${filtered.length} file${filtered.length === 1 ? '' : 's'}`),
+      )
+      filtered = shown
     }
     const rebuilt = new SelectList(filtered, Math.min(12, Math.max(2, filtered.length)), selectListTheme)
     rebuilt.onSelect = this.list.onSelect
     rebuilt.onCancel = this.list.onCancel
     this.list = rebuilt
-    this.children[this.children.length - 1] = rebuilt
+    this.children[this.listChildIndex] = rebuilt
   }
 }
 

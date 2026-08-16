@@ -40,6 +40,7 @@ import {
   type TUI,
 } from '@earendil-works/pi-tui'
 import { applyEvent, createModel, pushNotice, type ChatItem, type ChatModel } from '../core/model.js'
+import { runRgFiles, shouldShowPath } from '../core/files.js'
 import {
   ctrlC,
   cycleEffort,
@@ -595,6 +596,7 @@ export class ChatScreen {
     const picked = await pickFromListWithSearch(this.tui, {
       title: 'Attach file',
       items: files.map((file) => ({ value: file, label: file })),
+      shouldShow: (query, item) => shouldShowPath(query, item.label),
     })
     if (picked !== undefined) {
       const text = this.editor.getText()
@@ -604,8 +606,31 @@ export class ChatScreen {
     }
   }
 
-  /** Bounded recursive walk over the session cwd through the dsh fs seam. */
+  private rgCache: string[] | undefined
+
+  /**
+   * Enumerate attachable files. Primary source: one ripgrep run with the
+   * standard ignore convention (.gitignore/.ignore nested + unconditional
+   * excludes); falls back to the ctx.fs walker when rg is unavailable.
+   */
   private async listWorkspaceFiles(): Promise<string[]> {
+    if (this.rgCache !== undefined) return this.rgCache
+    const viaRg = await this.tryRgListing()
+    this.rgCache = viaRg.length > 0 ? viaRg : await this.walkFallback()
+    return this.rgCache
+  }
+
+  private async tryRgListing(): Promise<string[]> {
+    try {
+      const { rgPath } = await import('@vscode/ripgrep')
+      return await runRgFiles(rgPath, this.cwd)
+    } catch {
+      return []
+    }
+  }
+
+  /** Bounded recursive walk through the dsh fs seam (rg-unavailable fallback). */
+  private async walkFallback(): Promise<string[]> {
     const fs = this.ctx.get('fs') as
       | {
           resolve(path: string): Promise<{ displayPath: string }>
@@ -636,7 +661,14 @@ export class ChatScreen {
       '.turbo',
       '.next',
       '.cache',
+      '__pycache__',
+      '.svn',
+      '.hg',
+      '.bzr',
+      '.jj',
+      '.sl',
     ])
+    const junkFiles = new Set(['.DS_Store', 'Thumbs.db'])
     let root: unknown
     try {
       root = await fs.resolve(this.cwd)
@@ -644,7 +676,7 @@ export class ChatScreen {
       return []
     }
     const walk = async (target: unknown, depth: number): Promise<void> => {
-      if (depth > 4 || results.length >= 300) return
+      if (depth > 8 || results.length >= 5000) return
       let entries
       try {
         entries = await fs.listDir(target)
@@ -652,8 +684,9 @@ export class ChatScreen {
         return
       }
       for (const entry of entries) {
-        if (results.length >= 300) return
+        if (results.length >= 5000) return
         if (entry.type === 'file') {
+          if (junkFiles.has(entry.name) || entry.name.endsWith('.pyc')) continue
           const rel = relative(this.cwd, entry.target.displayPath) || entry.name
           if (!visited.has(rel)) {
             visited.add(rel)
@@ -667,6 +700,7 @@ export class ChatScreen {
     await walk(root, 0)
     return results.sort()
   }
+
 
   private async modelCompletions(prefix: string) {
     const llm = this.llm()
