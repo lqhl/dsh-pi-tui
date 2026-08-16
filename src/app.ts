@@ -7,7 +7,6 @@
  * disposing the whole tree (bounded fallback, cc-tui semantics).
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { ProcessTerminal, TuiMainScreen, type TUI } from '@earendil-works/pi-tui'
 import { parseArgs, USAGE } from './args.js'
 import { listPresets, listSessions, resolveAgent, type ResolvedAgent } from './core/session.js'

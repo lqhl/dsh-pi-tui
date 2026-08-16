@@ -41,7 +41,8 @@ export function renderContextBar(
 
 /** Context pressure percentage (0-100), or undefined when unknown. */
 export function contextPctOf(
-  pressure: { pressureTokens?: number; projectedTokens?: number; contextWindow?: number } | undefined,
+  pressure:
+    { pressureTokens?: number; projectedTokens?: number; contextWindow?: number } | undefined,
 ): number | undefined {
   if (pressure?.contextWindow === undefined || pressure.contextWindow <= 0) return undefined
   const tokens = pressure.projectedTokens ?? pressure.pressureTokens

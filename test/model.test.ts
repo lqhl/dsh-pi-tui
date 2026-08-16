@@ -56,9 +56,22 @@ test('injected ! command context (plugin pi-tui) is not a user bubble', () => {
 
 test('streams text and reasoning deltas into separate items, seals on message', () => {
   const model = createModel()
-  applyEvent(model, event('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', text: 'thinking' } }, 1))
-  applyEvent(model, event('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'hi ' } }, 2))
-  applyEvent(model, event('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'there' } }, 3))
+  applyEvent(
+    model,
+    event(
+      'assistant/chunk',
+      { turn: 1, step: 1, chunk: { type: 'reasoning-delta', text: 'thinking' } },
+      1,
+    ),
+  )
+  applyEvent(
+    model,
+    event('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'hi ' } }, 2),
+  )
+  applyEvent(
+    model,
+    event('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'there' } }, 3),
+  )
   assert.equal(model.items.length, 2)
   assert.equal(model.items[0].kind, 'reasoning')
   assert.equal(model.items[0].text, 'thinking')
@@ -68,12 +81,16 @@ test('streams text and reasoning deltas into separate items, seals on message', 
 
   applyEvent(
     model,
-    event('assistant/message', {
-      turn: 1,
-      step: 1,
-      message: { role: 'assistant', content: [{ type: 'text', text: 'hi there!' }] },
-      usage: { inputTokens: 10, outputTokens: 2 },
-    }, 4),
+    event(
+      'assistant/message',
+      {
+        turn: 1,
+        step: 1,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'hi there!' }] },
+        usage: { inputTokens: 10, outputTokens: 2 },
+      },
+      4,
+    ),
   )
   assert.equal(model.items[1].text, 'hi there!')
   assert.equal(model.items[1].streaming, false)
@@ -85,7 +102,11 @@ test('tracks tool cards from call to settled result', () => {
   const model = createModel()
   applyEvent(
     model,
-    event('tool/call', { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' }, 1),
+    event(
+      'tool/call',
+      { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' },
+      1,
+    ),
   )
   assert.equal(model.items.length, 1)
   assert.equal(model.items[0].kind, 'tool')
@@ -94,15 +115,19 @@ test('tracks tool cards from call to settled result', () => {
 
   applyEvent(
     model,
-    event('tool/result', {
-      turn: 1,
-      step: 1,
-      message: {
-        role: 'tool',
-        source: { callId: 'c1' },
-        content: [{ type: 'tool-result', content: [{ type: 'text', text: 'file.txt' }] }],
+    event(
+      'tool/result',
+      {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'tool',
+          source: { callId: 'c1' },
+          content: [{ type: 'tool-result', content: [{ type: 'text', text: 'file.txt' }] }],
+        },
       },
-    }, 2),
+      2,
+    ),
   )
   assert.equal(model.items[0].tool?.status, 'ok')
   assert.equal(model.items[0].tool?.resultPreview, 'file.txt')
@@ -110,16 +135,24 @@ test('tracks tool cards from call to settled result', () => {
   // Error path on a second call.
   applyEvent(
     model,
-    event('tool/call', { turn: 1, step: 1, callId: 'c2', name: 'bash', arguments: '{"command":"nope"}' }, 3),
+    event(
+      'tool/call',
+      { turn: 1, step: 1, callId: 'c2', name: 'bash', arguments: '{"command":"nope"}' },
+      3,
+    ),
   )
   applyEvent(
     model,
-    event('tool/result', {
-      turn: 1,
-      step: 1,
-      message: { role: 'tool', source: { callId: 'c2' }, content: [] },
-      error: { name: 'SandboxError', code: 'DENIED' },
-    }, 4),
+    event(
+      'tool/result',
+      {
+        turn: 1,
+        step: 1,
+        message: { role: 'tool', source: { callId: 'c2' }, content: [] },
+        error: { name: 'SandboxError', code: 'DENIED' },
+      },
+      4,
+    ),
   )
   const failed = model.items.find((item) => item.tool?.callId === 'c2')
   assert.equal(failed?.tool?.status, 'error')
@@ -130,7 +163,11 @@ test('skips ask_user_question tool cards (provider renders them)', () => {
   const model = createModel()
   applyEvent(
     model,
-    event('tool/call', { turn: 1, step: 1, callId: 'q1', name: 'ask_user_question', arguments: '{}' }, 1),
+    event(
+      'tool/call',
+      { turn: 1, step: 1, callId: 'q1', name: 'ask_user_question', arguments: '{}' },
+      1,
+    ),
   )
   assert.equal(model.items.length, 0)
 })
@@ -140,7 +177,14 @@ test('turn boundaries drive the working flag and fold reasoning', () => {
   assert.equal(model.working, false)
   applyEvent(model, event('turn/start', { turn: 1 }, 1))
   assert.equal(model.working, true)
-  applyEvent(model, event('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', text: 'r' } }, 2))
+  applyEvent(
+    model,
+    event(
+      'assistant/chunk',
+      { turn: 1, step: 1, chunk: { type: 'reasoning-delta', text: 'r' } },
+      2,
+    ),
+  )
   applyEvent(model, event('turn/end', { turn: 1, reason: 'completed' }, 3))
   assert.equal(model.working, false)
   assert.equal(model.items[0].streaming, false)
@@ -180,7 +224,11 @@ test('failed turns produce error notices', () => {
   applyEvent(model, event('turn/start', { turn: 1 }, 1))
   applyEvent(
     model,
-    event('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'UNAUTHORIZED', message: 'bad key' } } }, 2),
+    event(
+      'turn/end',
+      { turn: 1, reason: { kind: 'error', error: { code: 'UNAUTHORIZED', message: 'bad key' } } },
+      2,
+    ),
   )
   const notice = model.items.find((item) => item.kind === 'notice')
   assert.ok(notice !== undefined)
@@ -209,7 +257,9 @@ test('request/header reads back the dispatched route and effort', () => {
   applyEvent(
     model,
     event('request/header', {
-      header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' } },
+      header: {
+        config: { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' },
+      },
       reason: 'initial',
     }),
   )
@@ -226,11 +276,19 @@ test('tool results keep the full text for expansion', () => {
   )
   applyEvent(
     model,
-    event('tool/result', {
-      turn: 1,
-      step: 1,
-      message: { role: 'tool', source: { callId: 'c1' }, content: [{ type: 'tool-result', content: [{ type: 'text', text: long }] }] },
-    }, 2),
+    event(
+      'tool/result',
+      {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'tool',
+          source: { callId: 'c1' },
+          content: [{ type: 'tool-result', content: [{ type: 'text', text: long }] }],
+        },
+      },
+      2,
+    ),
   )
   const card = model.items[0].tool
   assert.equal(card?.resultFull, long)

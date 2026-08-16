@@ -21,15 +21,12 @@ import { tmpdir } from 'node:os'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, relative } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  installModelSelection,
-  type ModelSelectionRef,
-} from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { createUserMessage, ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { isUserInvocable, type SkillSummary } from '@deepseek-ai/dsh-skill'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   CombinedAutocompleteProvider,
   Container,
@@ -42,9 +39,13 @@ import {
   type SlashCommand,
   type TUI,
 } from '@earendil-works/pi-tui'
-import { applyEvent, createModel, pushNotice, textOf, type ChatItem, type ChatModel } from '../core/model.js'
+import { applyEvent, createModel, pushNotice, textOf, type ChatModel } from '../core/model.js'
 import { seedModelSelection } from '../core/selection.js'
-import { AgentDefaultModelService, JobsService, SessionProjectionsService } from '../core/services.js'
+import {
+  AgentDefaultModelService,
+  JobsService,
+  SessionProjectionsService,
+} from '../core/services.js'
 import { runRgFiles, shouldShowPath } from '../core/files.js'
 import {
   ctrlC,
@@ -78,8 +79,14 @@ export interface ChatScreenOptions {
 }
 
 interface LlmRuntime extends LlmRuntimeLike {
-  resolveModelInfo(provider: string, model: string): Promise<{
-    reasoning?: { efforts?: { id: string; name: string; description?: string }[]; defaultEffort?: string }
+  resolveModelInfo(
+    provider: string,
+    model: string,
+  ): Promise<{
+    reasoning?: {
+      efforts?: { id: string; name: string; description?: string }[]
+      defaultEffort?: string
+    }
   }>
   resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>
 }
@@ -114,7 +121,7 @@ export class ChatScreen {
     this.tui = options.tui
     this.agent = options.agent
     this.config = options.config
-    this.commands = this.ctx.get('commands') as CommandRuntime | undefined
+    this.commands = this.ctx.get('commands')
     this.onAgentSwitch = options.onAgentSwitch
 
     this.seedSelection()
@@ -274,8 +281,7 @@ export class ChatScreen {
 
   /** The harness's shared default-model selection (same source as app.ts). */
   private defaultSelection():
-    | { provider?: string; model?: string; reasoningEffort?: string }
-    | undefined {
+    { provider?: string; model?: string; reasoningEffort?: string } | undefined {
     const service = this.ctx.get('agentDefaultModel') as AgentDefaultModelService | undefined
     return service?.currentSelection()
   }
@@ -285,7 +291,7 @@ export class ChatScreen {
    * old per-agent selection install, reset the transcript, reinstall and
    * reseed the selection, replay the durable log, and repaint.
    */
-  async switchAgent(next: Agent): Promise<void> {
+  switchAgent(next: Agent): void {
     if (next === this.agent) return
     if (this.isBusy()) {
       this.pushNotice('cannot switch sessions while work is running (Esc to interrupt)', 'error')
@@ -356,7 +362,11 @@ export class ChatScreen {
       { name: 'fork', description: 'Fork this session at its current end' },
       { name: 'resume', description: 'List sessions / reopen one' },
       { name: 'tree', description: 'Subagent session tree' },
-      { name: 'model', description: 'Switch model', getArgumentCompletions: (prefix) => this.modelCompletions(prefix) },
+      {
+        name: 'model',
+        description: 'Switch model',
+        getArgumentCompletions: (prefix) => this.modelCompletions(prefix),
+      },
       { name: 'thinking', description: 'Set thinking effort (off/high/max)' },
       { name: 'skills', description: 'List user-invocable skills' },
       { name: 'agents', description: 'List live subagents' },
@@ -366,9 +376,7 @@ export class ChatScreen {
       { name: 'hotkeys', description: 'Show key bindings' },
     ]
     this.editor.setAutocompleteProvider(
-      new PathAwareAutocomplete(
-        new CombinedAutocompleteProvider(slashCommands, this.cwd),
-      ),
+      new PathAwareAutocomplete(new CombinedAutocompleteProvider(slashCommands, this.cwd)),
     )
     // Rebuild the provider once the skill catalog arrives so `/` completes
     // user-invocable skills too (plain `/name` — the dsh pre-step gesture
@@ -388,8 +396,8 @@ export class ChatScreen {
   }
 
   /** Switch and notify the app layer (which owns old-handle disposal). */
-  private async commitSwitch(resolved: ResolvedAgent): Promise<void> {
-    await this.switchAgent(resolved.agent)
+  private commitSwitch(resolved: ResolvedAgent): void {
+    this.switchAgent(resolved.agent)
     this.onAgentSwitch?.(resolved)
   }
 
@@ -422,10 +430,13 @@ export class ChatScreen {
         this.sessionOptions(),
         this.sessionMeta(),
       )
-      await this.commitSwitch(resolved)
+      this.commitSwitch(resolved)
       this.pushNotice(`new session ${this.currentSessionId.slice(0, 8)}`)
     } catch (error) {
-      this.pushNotice(`/new failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+      this.pushNotice(
+        `/new failed: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      )
     }
   }
 
@@ -441,10 +452,15 @@ export class ChatScreen {
         this.sessionOptions(),
         this.sessionMeta(),
       )
-      await this.commitSwitch(resolved)
-      this.pushNotice(`forked → ${this.currentSessionId.slice(0, 8)} (history kept, lineage recorded)`)
+      this.commitSwitch(resolved)
+      this.pushNotice(
+        `forked → ${this.currentSessionId.slice(0, 8)} (history kept, lineage recorded)`,
+      )
     } catch (error) {
-      this.pushNotice(`/fork failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+      this.pushNotice(
+        `/fork failed: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      )
     }
   }
 
@@ -460,14 +476,15 @@ export class ChatScreen {
         this.pushNotice('no persisted sessions')
         return
       }
-      target = (await pickFromListWithSearch(this.tui, {
-        title: 'Resume session',
-        items: headers.map((header) => ({
-          value: String(header.id),
-          label: `${basename(header.cwd ?? '')} · ${String(header.id).slice(0, 8)}`,
-          description: new Date(header.createdAt).toLocaleString(),
-        })),
-      })) ?? ''
+      target =
+        (await pickFromListWithSearch(this.tui, {
+          title: 'Resume session',
+          items: headers.map((header) => ({
+            value: String(header.id),
+            label: `${basename(header.cwd ?? '')} · ${String(header.id).slice(0, 8)}`,
+            description: new Date(header.createdAt).toLocaleString(),
+          })),
+        })) ?? ''
     }
     if (target === '') return
     try {
@@ -477,10 +494,13 @@ export class ChatScreen {
         this.sessionOptions(),
         this.sessionMeta(),
       )
-      await this.commitSwitch(resolved)
+      this.commitSwitch(resolved)
       this.pushNotice(`resumed ${this.currentSessionId.slice(0, 8)}`)
     } catch (error) {
-      this.pushNotice(`/resume failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+      this.pushNotice(
+        `/resume failed: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      )
     }
   }
 
@@ -491,7 +511,13 @@ export class ChatScreen {
             root: unknown,
             signal?: AbortSignal,
           ): Promise<
-            readonly { id: string; depth: number; mode: string; activity: string; hasChildren?: boolean }[]
+            readonly {
+              id: string
+              depth: number
+              mode: string
+              activity: string
+              hasChildren?: boolean
+            }[]
           >
         }
       | undefined
@@ -513,8 +539,13 @@ export class ChatScreen {
       })),
     })
     if (picked !== undefined) {
-      const resolved = await resolveAgent(this.ctx, picked, this.sessionOptions(), this.sessionMeta())
-      await this.commitSwitch(resolved)
+      const resolved = await resolveAgent(
+        this.ctx,
+        picked,
+        this.sessionOptions(),
+        this.sessionMeta(),
+      )
+      this.commitSwitch(resolved)
     }
   }
 
@@ -802,10 +833,10 @@ export class ChatScreen {
   /** Plan-mode state from the projection (active, or pending-on). */
   private planState(): boolean {
     try {
-      const projections = this.ctx.get('sessionProjections') as SessionProjectionsService | undefined
+      const projections = this.ctx.get('sessionProjections') as
+        SessionProjectionsService | undefined
       const plan = projections?.snapshot(this.agent.session).values?.plan as
-        | { active?: boolean; wanted?: boolean | null }
-        | undefined
+        { active?: boolean; wanted?: boolean | null } | undefined
       return plan?.active === true || plan?.wanted === true
     } catch {
       return false
@@ -837,10 +868,8 @@ export class ChatScreen {
   private async listSkills(): Promise<readonly SkillSummary[]> {
     try {
       const presets = this.ctx.get('agentPresets') as
-        | { serviceFor(agent: unknown, key: string): unknown }
-        | undefined
-      const registry = (presets?.serviceFor(this.agent, 'skills') ??
-        this.ctx.get('skills')) as
+        { serviceFor(agent: unknown, key: string): unknown } | undefined
+      const registry = (presets?.serviceFor(this.agent, 'skills') ?? this.ctx.get('skills')) as
         | { list(options: { cwd?: string; scope?: unknown }): Promise<readonly SkillSummary[]> }
         | undefined
       if (registry === undefined) return []
@@ -853,7 +882,10 @@ export class ChatScreen {
 
   private async cmdExport(): Promise<void> {
     const fs = this.ctx.get('fs') as
-      | { resolve(path: string): Promise<unknown>; writeText(target: unknown, content: string): Promise<void> }
+      | {
+          resolve(path: string): Promise<unknown>
+          writeText(target: unknown, content: string): Promise<void>
+        }
       | undefined
     if (fs === undefined) {
       this.pushNotice('fs service unavailable', 'error')
@@ -882,18 +914,20 @@ export class ChatScreen {
       await fs.writeText(target, lines.join('\n'))
       this.pushNotice(`exported → ${path}`)
     } catch (error) {
-      this.pushNotice(`export failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+      this.pushNotice(
+        `export failed: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      )
     }
   }
 
-  private async cmdRename(title: string): Promise<void> {
+  private cmdRename(title: string): void {
     if (title === '') {
       this.pushNotice('usage: /rename <title>', 'error')
       return
     }
     const service = this.ctx.get('sessionTitle') as
-      | { rename(session: unknown, title: string): void }
-      | undefined
+      { rename(session: unknown, title: string): void } | undefined
     if (service === undefined) {
       this.pushNotice('session title service unavailable', 'error')
       return
@@ -904,7 +938,10 @@ export class ChatScreen {
       this.sync()
       this.pushNotice(`session renamed: ${title}`)
     } catch (error) {
-      this.pushNotice(`rename failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+      this.pushNotice(
+        `rename failed: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      )
     }
   }
 
@@ -975,7 +1012,8 @@ export class ChatScreen {
       // Drain incremental output until the process settles: read first (no
       // initial lag), then wait for settlement or a short poll tick.
       let output = ''
-      const tick = (): Promise<boolean> => new Promise((resolve) => setTimeout(() => resolve(false), 50))
+      const tick = (): Promise<boolean> =>
+        new Promise((resolve) => setTimeout(() => resolve(false), 50))
       while (true) {
         const read = process.readOutput()
         if (read.delta !== '') {
@@ -1150,7 +1188,6 @@ export class ChatScreen {
     return results.sort()
   }
 
-
   private async modelCompletions(prefix: string) {
     const llm = this.llm()
     if (llm === undefined) return null
@@ -1197,16 +1234,15 @@ export class ChatScreen {
    * base64 for the tool card (best effort; the text envelope still shows).
    */
   private async resolveImages(event: SessionEvent): Promise<void> {
-    const callId = (event.data as { message?: { source?: { callId?: string } } }).message
-      ?.source?.callId
+    const callId = (event.data as { message?: { source?: { callId?: string } } }).message?.source
+      ?.callId
     if (callId === undefined) return
     const card = this.model.items.find(
       (item) => item.kind === 'tool' && item.tool?.callId === callId,
     )
     if (card === undefined || card.tool?.imageRefs === undefined) return
     const attachments = this.ctx.get('attachments') as
-      | { readImage(ref: unknown, signal?: AbortSignal): Promise<{ data: Uint8Array }> }
-      | undefined
+      { readImage(ref: unknown, signal?: AbortSignal): Promise<{ data: Uint8Array }> } | undefined
     if (attachments === undefined) return
     const images: { base64: string; mediaType: string }[] = []
     for (const ref of card.tool.imageRefs) {
@@ -1251,8 +1287,7 @@ export class ChatScreen {
       return
     }
     const shell = this.ctx.get('shell') as
-      | { run(req: unknown): Promise<{ exitCode: number | null }> }
-      | undefined
+      { run(req: unknown): Promise<{ exitCode: number | null }> } | undefined
     if (shell === undefined) {
       this.pushNotice('shell service unavailable', 'error')
       return
@@ -1299,12 +1334,7 @@ export class ChatScreen {
 
     // Working loader between messages and the status bar.
     if (this.model.working && this.workingLoader === undefined) {
-      const loader = new Loader(
-        this.tui,
-        style.spinner,
-        style.workingLabel,
-        'Working…',
-      )
+      const loader = new Loader(this.tui, style.spinner, style.workingLabel, 'Working…')
       loader.start()
       this.workingLoader = loader
       this.messages.addChild(loader)
@@ -1326,7 +1356,8 @@ export class ChatScreen {
     let contextTotal: number | undefined
     let sandboxMode: string | undefined
     try {
-      const projections = this.ctx.get('sessionProjections') as SessionProjectionsService | undefined
+      const projections = this.ctx.get('sessionProjections') as
+        SessionProjectionsService | undefined
       const values = projections?.snapshot(this.agent.session).values
       const projection = collectProjection(values, this.model.tokens)
       tokens = projection.tokens
@@ -1345,8 +1376,7 @@ export class ChatScreen {
     if (sandboxMode === undefined) {
       try {
         const policy = this.ctx.get('sandboxPolicy') as
-          | { resolve(request?: { session?: unknown }): { mode: string } }
-          | undefined
+          { resolve(request?: { session?: unknown }): { mode: string } } | undefined
         sandboxMode = policy?.resolve({ session: this.agent.session }).mode
       } catch {
         // Optional service.
@@ -1444,7 +1474,9 @@ export class ChatScreen {
   > {
     const persistence = this.ctx.get('sessionPersistence') as
       | {
-          list(signal?: AbortSignal): Promise<readonly { id: string; cwd?: string; createdAt: number }[]>
+          list(
+            signal?: AbortSignal,
+          ): Promise<readonly { id: string; cwd?: string; createdAt: number }[]>
           load(id: unknown): Promise<{ events: readonly SessionEvent[] }>
         }
       | undefined
@@ -1464,9 +1496,7 @@ export class ChatScreen {
               (event.data as { source?: { kind?: string } }).source?.kind === 'user',
           )
           if (first !== undefined) {
-            const text = textOf(
-              (first.data as { content?: Parameters<typeof textOf>[0] }).content,
-            )
+            const text = textOf((first.data as { content?: Parameters<typeof textOf>[0] }).content)
             if (text !== '') {
               results.push({
                 index: results.length,
@@ -1523,11 +1553,7 @@ class PathAwareAutocomplete implements AutocompleteProvider {
     return this.inner.triggerCharacters
   }
 
-  shouldTriggerFileCompletion(
-    lines: string[],
-    cursorLine: number,
-    cursorCol: number,
-  ): boolean {
+  shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
     const before = (lines[cursorLine] ?? '').slice(0, cursorCol)
     const token = before.slice(before.lastIndexOf(' ') + 1)
     return isPathLikeToken(token)

@@ -4,11 +4,7 @@
  * cards — reproduced here with pi-tui's theme functions.
  */
 import chalk from 'chalk'
-import type {
-  EditorTheme,
-  MarkdownTheme,
-  SelectListTheme,
-} from '@earendil-works/pi-tui'
+import type { EditorTheme, MarkdownTheme, SelectListTheme } from '@earendil-works/pi-tui'
 
 const accent = chalk.hex('#4fc1ff')
 const muted = chalk.hex('#8899aa')
@@ -37,7 +33,7 @@ export const reasoningMarkdownTheme: MarkdownTheme = {
 }
 
 export const selectListTheme: SelectListTheme = {
-  selectedPrefix: (text) => accent('❯ '),
+  selectedPrefix: (_text) => accent('❯ '),
   selectedText: (text) => chalk.bold.blue(text),
   description: (text) => chalk.dim(text),
   scrollInfo: (text) => chalk.dim(text),
@@ -52,7 +48,7 @@ export const editorTheme: EditorTheme = {
 export const style = {
   accent,
   muted,
-  userPrefix: (text: string) => accent('❯ '),
+  userPrefix: (_text: string) => accent('❯ '),
   userText: (text: string) => chalk.bold(text),
   thinkingLabel: (text: string) => chalk.dim.italic(text),
   toolName: (text: string) => chalk.cyan.bold(text),

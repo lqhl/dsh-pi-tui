@@ -1,0 +1,9 @@
+lib/
+node_modules/
+package-lock.json
+PLAN.md
+UX.md
+UX2.md
+UX3.md
+UX4.md
+UX5.md

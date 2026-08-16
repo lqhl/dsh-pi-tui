@@ -123,6 +123,7 @@ export async function resolveAgent(
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(
       `pi-tui: failed to create agent (provider=${agentOptions.provider ?? 'deepseek-official'}): ${message}`,
+      { cause: error },
     )
   }
 }
@@ -139,15 +140,13 @@ export async function forkSession(
   meta: SessionMeta,
 ): Promise<ResolvedAgent> {
   const sessions = ctx.get('sessions') as
-    | { fork(source: unknown, boundary?: number): { events: readonly SessionEvent[] } }
-    | undefined
+    { fork(source: unknown, boundary?: number): { events: readonly SessionEvent[] } } | undefined
   if (sessions === undefined) {
     throw new Error('pi-tui: sessions service unavailable for fork')
   }
   const seed = sessions.fork(source.session).events
   const presets = ctx.get('agentPresets') as
-    | { composedPreset(agentCtx: Context): string | undefined }
-    | undefined
+    { composedPreset(agentCtx: Context): string | undefined } | undefined
   const composition = await composeSetup(
     ctx,
     meta.agentPreset ?? presets?.composedPreset(source.ctx),
@@ -169,8 +168,7 @@ export async function forkSession(
 /** Persisted session headers, newest first (dsh's own persistence backend). */
 export async function listSessions(ctx: Context): Promise<SessionHeader[]> {
   const persistence = ctx.get('sessionPersistence') as
-    | { list(signal?: AbortSignal): Promise<readonly SessionHeader[]> }
-    | undefined
+    { list(signal?: AbortSignal): Promise<readonly SessionHeader[]> } | undefined
   if (persistence === undefined) return []
   try {
     const headers = await persistence.list()
@@ -194,9 +192,7 @@ export interface PresetInfo {
 
 /** The agent-preset roster (标准/PTC 模式/极简/…), name-sorted. */
 export async function listPresets(ctx: Context): Promise<PresetInfo[]> {
-  const presets = ctx.get('agentPresets') as
-    | { list(): Promise<readonly PresetInfo[]> }
-    | undefined
+  const presets = ctx.get('agentPresets') as { list(): Promise<readonly PresetInfo[]> } | undefined
   if (presets === undefined) return []
   try {
     const all = await presets.list()

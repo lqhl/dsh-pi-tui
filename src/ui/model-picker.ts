@@ -30,7 +30,8 @@ export async function listAllModels(llm: LlmRuntimeLike): Promise<ModelRoute[]> 
 }
 
 function toItem(route: ModelRoute, current: ModelRoute | undefined, index: number): ListPickItem {
-  const isCurrent = current !== undefined && current.provider === route.provider && current.model === route.model
+  const isCurrent =
+    current !== undefined && current.provider === route.provider && current.model === route.model
   return {
     value: `${route.provider}\u0000${route.model}`,
     label: `${isCurrent ? '✓ ' : '  '}${route.model}${route.model !== route.provider ? ` (${route.provider})` : ''}`,

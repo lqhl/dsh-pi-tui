@@ -120,14 +120,23 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
   switch (event.type) {
     case 'user/message': {
       // Compaction checkpoint: render as a framed notice, not a bubble.
-      if (
-        event.data.source.kind === 'plugin' &&
-        event.data.source.plugin === 'compact'
-      ) {
-        push({ kind: 'notice', text: 'Conversation compacted', streaming: false, seq: event.seq, notice: 'compact' })
+      if (event.data.source.kind === 'plugin' && event.data.source.plugin === 'compact') {
+        push({
+          kind: 'notice',
+          text: 'Conversation compacted',
+          streaming: false,
+          seq: event.seq,
+          notice: 'compact',
+        })
         const summary = textOf(event.data.content)
         if (summary) {
-          push({ kind: 'notice', text: summary, streaming: false, seq: event.seq, notice: 'compact' })
+          push({
+            kind: 'notice',
+            text: summary,
+            streaming: false,
+            seq: event.seq,
+            notice: 'compact',
+          })
         }
         break
       }
@@ -187,9 +196,7 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
     }
     case 'tool/result': {
       const callId = event.data.message.source.callId
-      const card = model.items.find(
-        (item) => item.kind === 'tool' && item.tool?.callId === callId,
-      )
+      const card = model.items.find((item) => item.kind === 'tool' && item.tool?.callId === callId)
       if (card === undefined || card.tool === undefined) break
       card.streaming = false
       const failure = event.data.error
@@ -200,9 +207,7 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
         card.tool.status = 'ok'
         const block = event.data.message.content[0]
         const result =
-          block !== undefined && block.type === 'tool-result'
-            ? textOf(block.content)
-            : ''
+          block !== undefined && block.type === 'tool-result' ? textOf(block.content) : ''
         if (result) {
           card.tool.resultPreview = preview(result, RESULT_PREVIEW_LIMIT)
           card.tool.resultFull = result
@@ -212,11 +217,13 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
           .filter((block) => block.type === 'image')
           .map((block) => {
             const attachment = (block as unknown as { attachment?: unknown }).attachment as
-              | ImageAttachmentRef
-              | undefined
+              ImageAttachmentRef | undefined
             return attachment
           })
-          .filter((ref): ref is ImageAttachmentRef => ref !== undefined && typeof ref.attachmentId === 'string')
+          .filter(
+            (ref): ref is ImageAttachmentRef =>
+              ref !== undefined && typeof ref.attachmentId === 'string',
+          )
         if (imageRefs.length > 0) card.tool.imageRefs = imageRefs
         const meta = event.data.meta as { diffs?: unknown } | undefined
         if (meta !== undefined && Array.isArray(meta.diffs)) {
@@ -230,8 +237,7 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       // The request actually dispatched: read back the resolved route and
       // reasoning effort (status-bar truth, durable on replay).
       const config = event.data.header.config as
-        | { provider?: string; model?: string; reasoningEffort?: string }
-        | undefined
+        { provider?: string; model?: string; reasoningEffort?: string } | undefined
       if (config !== undefined) {
         model.route = { provider: config.provider, model: config.model }
         if (config.reasoningEffort !== undefined) model.effort = config.reasoningEffort
@@ -254,11 +260,29 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       const reason = event.data.reason
       if (reason.kind === 'error') {
         const failure = (reason as { error: { code?: string; message?: string } }).error
-        push({ kind: 'notice', text: `turn failed: ${failure?.code ?? 'ERROR'}${failure?.message ? ` — ${failure.message}` : ''}`, streaming: false, seq: event.seq, notice: 'error' })
+        push({
+          kind: 'notice',
+          text: `turn failed: ${failure?.code ?? 'ERROR'}${failure?.message ? ` — ${failure.message}` : ''}`,
+          streaming: false,
+          seq: event.seq,
+          notice: 'error',
+        })
       } else if (reason.kind === 'aborted') {
-        push({ kind: 'notice', text: 'turn aborted', streaming: false, seq: event.seq, notice: 'info' })
+        push({
+          kind: 'notice',
+          text: 'turn aborted',
+          streaming: false,
+          seq: event.seq,
+          notice: 'info',
+        })
       } else if (reason.kind === 'max-tokens') {
-        push({ kind: 'notice', text: 'turn hit the output-token ceiling', streaming: false, seq: event.seq, notice: 'info' })
+        push({
+          kind: 'notice',
+          text: 'turn hit the output-token ceiling',
+          streaming: false,
+          seq: event.seq,
+          notice: 'info',
+        })
       }
       break
     }

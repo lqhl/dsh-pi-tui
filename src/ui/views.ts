@@ -111,8 +111,13 @@ export class NoticeView extends Text {
         return
       }
       const marker =
-        flavor === 'error' ? style.toolError('✗') : flavor === 'compact' ? style.accent('»') : style.muted('ℹ')
-      const text = flavor === 'error' ? style.toolError(this.item.text) : style.muted(this.item.text)
+        flavor === 'error'
+          ? style.toolError('✗')
+          : flavor === 'compact'
+            ? style.accent('»')
+            : style.muted('ℹ')
+      const text =
+        flavor === 'error' ? style.toolError(this.item.text) : style.muted(this.item.text)
       this.setText(`${marker} ${text}`)
     }
   }
@@ -168,9 +173,10 @@ export class ToolCardView implements Component {
       if (this.expand && tool.diffs !== undefined && tool.diffs.length > 0) {
         lines.push(...this.renderDiffLines(border, truncate))
       } else if (tool.resultPreview !== undefined && tool.resultPreview !== '') {
-        const body = this.expand && tool.resultFull !== undefined && tool.resultFull !== ''
-          ? tool.resultFull
-          : tool.resultPreview
+        const body =
+          this.expand && tool.resultFull !== undefined && tool.resultFull !== ''
+            ? tool.resultFull
+            : tool.resultPreview
         // Full output: keep every line, each truncated to the inner width,
         // capped at a generous height for very large results.
         const fullLines = body.split('\n').slice(0, 50)
@@ -185,15 +191,22 @@ export class ToolCardView implements Component {
       const capabilities = getCapabilities()
       if (capabilities.images !== null) {
         for (const image of this.images) {
-          const component = new Image(image.base64, image.mediaType, {
-            fallbackColor: (text) => chalk.dim(text),
-          }, { maxWidthCells: Math.max(10, inner - 2) })
+          const component = new Image(
+            image.base64,
+            image.mediaType,
+            {
+              fallbackColor: (text) => chalk.dim(text),
+            },
+            { maxWidthCells: Math.max(10, inner - 2) },
+          )
           for (const line of component.render(width)) {
             lines.push(`${border} ${line}`)
           }
         }
       } else {
-        lines.push(`${border} ${truncate(chalk.dim(`(image: ${this.images.map((image) => image.mediaType).join(', ')} — run in a kitty/iTerm2 terminal to view inline)`))}`)
+        lines.push(
+          `${border} ${truncate(chalk.dim(`(image: ${this.images.map((image) => image.mediaType).join(', ')} — run in a kitty/iTerm2 terminal to view inline)`))}`,
+        )
       }
     }
     this.lastRender = lines.join('\n')
@@ -201,10 +214,7 @@ export class ToolCardView implements Component {
   }
 
   /** Colored unified diff per changed file (adapts pi's diff rendering). */
-  private renderDiffLines(
-    border: string,
-    truncate: (line: string) => string,
-  ): string[] {
+  private renderDiffLines(border: string, truncate: (line: string) => string): string[] {
     const lines: string[] = []
     for (const file of this.item.tool?.diffs ?? []) {
       lines.push(`${border} ${style.toolName(file.path)}`)

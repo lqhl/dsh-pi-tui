@@ -57,7 +57,11 @@ class ListPanel extends Container {
 
 /** Content root forwarding input to an Input child. */
 class InputPanel extends Container {
-  constructor(title: string, body: string | undefined, private readonly input: Input) {
+  constructor(
+    title: string,
+    body: string | undefined,
+    private readonly input: Input,
+  ) {
     super()
     this.addChild(new Text(style.accent(title), 1, 0))
     if (body !== undefined && body !== '') {
@@ -92,7 +96,11 @@ export function pickFromList(
   },
 ): Promise<string | undefined> {
   return new Promise((resolve) => {
-    const list = new SelectList(options.items, Math.min(12, Math.max(2, options.items.length)), selectListTheme)
+    const list = new SelectList(
+      options.items,
+      Math.min(12, Math.max(2, options.items.length)),
+      selectListTheme,
+    )
     const panel = new ListPanel(options.title, options.body, list)
     const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
     list.onSelect = (item) => {
@@ -124,7 +132,14 @@ export function pickFromListWithSearch(
 ): Promise<string | undefined> {
   return new Promise((resolve) => {
     const search = new Input()
-    const list = new SelectList(options.items, Math.min(12, Math.max(2, options.items.length)), selectListTheme)
+    const list = new SelectList(
+      options.items,
+      Math.min(12, Math.max(2, options.items.length)),
+      selectListTheme,
+    )
+    // Declared before the handlers so they can close over it; assigned once
+    // after showOverlay resolves (prefer-const cannot represent this).
+    // eslint-disable-next-line prefer-const
     let handle: ReturnType<TUI['showOverlay']> | undefined
     const onSelect = (item: { value: string; label: string; description?: string }): void => {
       if (item.value === '__nomatch__') return // placeholder is not a pick
@@ -218,8 +233,10 @@ class SearchPanel extends Container {
       // Two tiers, mirroring pi's filename-weighted fd scoring: basename
       // matches first (the user types filenames, not paths), then full-path
       // matches appended only when the basename tier is thin.
-      const byBasename = fuzzyFilter(visible, query, (item) =>
-        item.label.split('/').at(-1) ?? item.label,
+      const byBasename = fuzzyFilter(
+        visible,
+        query,
+        (item) => item.label.split('/').at(-1) ?? item.label,
       )
       if (byBasename.length >= 8) {
         filtered = byBasename
@@ -231,9 +248,7 @@ class SearchPanel extends Container {
     if (filtered.length === 0) {
       // A selectable-looking placeholder would let Enter "pick" an empty
       // value; use a sentinel the caller ignores.
-      filtered = [
-        { value: '__nomatch__', label: 'no matches', description: 'keep typing or Esc' },
-      ]
+      filtered = [{ value: '__nomatch__', label: 'no matches', description: 'keep typing or Esc' }]
       this.footer.setText('')
     } else {
       // The full list lives in memory; the render is capped and the footer
@@ -246,7 +261,11 @@ class SearchPanel extends Container {
       )
       filtered = shown
     }
-    const rebuilt = new SelectList(filtered, Math.min(12, Math.max(2, filtered.length)), selectListTheme)
+    const rebuilt = new SelectList(
+      filtered,
+      Math.min(12, Math.max(2, filtered.length)),
+      selectListTheme,
+    )
     rebuilt.onSelect = this.list.onSelect
     rebuilt.onCancel = this.list.onCancel
     this.list = rebuilt
@@ -276,7 +295,9 @@ export function confirmApproval(tui: TUI, request: ApprovalRequest): Promise<App
     const list = new SelectList(items, 2, selectListTheme)
     const panel = new ListPanel(
       `Approve ${request.toolName}?`,
-      request.reason !== undefined && request.reason !== '' ? `Reason: ${request.reason}` : undefined,
+      request.reason !== undefined && request.reason !== ''
+        ? `Reason: ${request.reason}`
+        : undefined,
       list,
     )
     const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '60%' })
@@ -354,8 +375,7 @@ function optionsStep(
   const multi = question.multiSelect === true
   const selected: string[] = []
   // Plan-review intent: approve option first, plan markdown as the body.
-  const approveLabel =
-    question.intent?.kind === 'plan-review' ? question.intent.approve : undefined
+  const approveLabel = question.intent?.kind === 'plan-review' ? question.intent.approve : undefined
   const ordered =
     approveLabel !== undefined
       ? [
@@ -373,10 +393,19 @@ function optionsStep(
     })),
   ]
 
-  const list = new SelectList(buildItems(), Math.min(12, Math.max(2, ordered.length + 1)), selectListTheme)
-  const panel = approveLabel !== undefined
-    ? new PlanReviewPanel(question.detail ?? '', list)
-    : new ListPanel(question.question, multi ? `${body}\n(multi-select: pick items, then Done)` : body, list)
+  const list = new SelectList(
+    buildItems(),
+    Math.min(12, Math.max(2, ordered.length + 1)),
+    selectListTheme,
+  )
+  const panel =
+    approveLabel !== undefined
+      ? new PlanReviewPanel(question.detail ?? '', list)
+      : new ListPanel(
+          question.question,
+          multi ? `${body}\n(multi-select: pick items, then Done)` : body,
+          list,
+        )
   const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
 
   list.onSelect = (picked) => {
@@ -390,7 +419,11 @@ function optionsStep(
     }
     if (!selected.includes(picked.value)) selected.push(picked.value)
     // Rebuild the list in place with updated check marks.
-    const rebuilt = new SelectList(buildItems(), Math.min(12, Math.max(2, ordered.length + 1)), selectListTheme)
+    const rebuilt = new SelectList(
+      buildItems(),
+      Math.min(12, Math.max(2, ordered.length + 1)),
+      selectListTheme,
+    )
     rebuilt.onSelect = list.onSelect
     rebuilt.onCancel = list.onCancel
     panel.replaceList(rebuilt)

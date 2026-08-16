@@ -41,10 +41,7 @@ test('tool card lines stay within width with CJK content', async () => {
   const output = stripAnsi(terminal.output)
   for (const line of output.split('\n')) {
     if (line.trim() === '') continue
-    assert.ok(
-      visibleWidth(line) <= terminal.width,
-      `line exceeds width ${terminal.width}: ${line}`,
-    )
+    assert.ok(visibleWidth(line) <= terminal.width, `line exceeds width ${terminal.width}: ${line}`)
   }
   tui.stop()
 })
@@ -70,7 +67,6 @@ test('expanded tool card truncates full CJK output lines', async () => {
 })
 
 function stripAnsi(text: string): string {
-  // eslint-disable-next-line no-control-regex
   return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
 }
 
@@ -89,11 +85,15 @@ test('diff rendering stays within width (CJK + ANSI)', async () => {
       argsPreview: '{}',
       status: 'ok',
       diffs: [
-        { path: 'wiki/OSDI.md', oldText: '旧的内容第一行\n第二行', newText: '新的内容第一行很长很长很长很长\n第二行' },
+        {
+          path: 'wiki/OSDI.md',
+          oldText: '旧的内容第一行\n第二行',
+          newText: '新的内容第一行很长很长很长很长\n第二行',
+        },
       ],
     },
   }
-  const view: Component = new ToolCardView(item)
+  const view = new ToolCardView(item)
   view.updateFromItem(true)
   tui.addChild(view)
   tui.start()
@@ -117,7 +117,13 @@ test('image capability fallback renders a text note, no crash', async () => {
     kind: 'tool',
     text: '',
     streaming: false,
-    tool: { callId: 'c1', name: 'read_image', argsPreview: '{}', status: 'ok', resultPreview: 'image 100x50' },
+    tool: {
+      callId: 'c1',
+      name: 'read_image',
+      argsPreview: '{}',
+      status: 'ok',
+      resultPreview: 'image 100x50',
+    },
   }
   const view = new ToolCardView(item)
   view.setImages([{ base64: 'aGVsbG8=', mediaType: 'image/png' }])

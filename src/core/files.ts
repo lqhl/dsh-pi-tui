@@ -57,11 +57,7 @@ export function shouldShowPath(query: string, path: string): boolean {
  * Enumerate visible files under `cwd` with one rg invocation. Resolves []
  * on any failure (the caller falls back to the fs walker).
  */
-export function runRgFiles(
-  rgPath: string,
-  cwd: string,
-  timeoutMs = 15000,
-): Promise<string[]> {
+export function runRgFiles(rgPath: string, cwd: string, timeoutMs = 15000): Promise<string[]> {
   return new Promise((resolve) => {
     const child = spawn(
       rgPath,

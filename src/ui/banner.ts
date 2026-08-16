@@ -32,7 +32,11 @@ export interface BannerInfo {
 
 /** Compose the welcome block (pre-colored; the view renders it verbatim). */
 export function buildBanner(info: BannerInfo): string {
-  const lines: string[] = [BLUE(WHALE_ART), '', `${BLUE('dsh-pi-tui')} · DeepSeek Harness Terminal UI`]
+  const lines: string[] = [
+    BLUE(WHALE_ART),
+    '',
+    `${BLUE('dsh-pi-tui')} · DeepSeek Harness Terminal UI`,
+  ]
   const facts: string[] = []
   if (info.model !== undefined) facts.push(`model: ${info.model}`)
   if (info.preset !== undefined) facts.push(`preset: ${info.preset}`)

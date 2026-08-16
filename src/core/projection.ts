@@ -26,8 +26,7 @@ export function collectProjection(
   const snapshot: ProjectionSnapshot = { tokens: fallbackTokens }
   const usage = (
     values?.tokenUsage as
-    | { totals?: { uncachedInputTokens: number; outputTokens: number } }
-    | undefined
+      { totals?: { uncachedInputTokens: number; outputTokens: number } } | undefined
   )?.totals
   if (usage !== undefined) {
     snapshot.tokens = { input: usage.uncachedInputTokens, output: usage.outputTokens }
@@ -40,12 +39,10 @@ export function collectProjection(
     }
   }
   snapshot.planActive = (values?.plan as { active?: boolean } | undefined)?.active === true
-  snapshot.goalPhase = (
-    values?.goal as { goal?: { phase?: string } } | null | undefined
-  )?.goal?.phase
+  snapshot.goalPhase = (values?.goal as { goal?: { phase?: string } } | null | undefined)?.goal
+    ?.phase
   const pressure = values?.contextPressure as
-    | { pressureTokens?: number; projectedTokens?: number; contextWindow?: number }
-    | undefined
+    { pressureTokens?: number; projectedTokens?: number; contextWindow?: number } | undefined
   snapshot.contextPct = contextPctOf(pressure)
   if (pressure?.contextWindow !== undefined && pressure.contextWindow > 0) {
     snapshot.contextTotal = pressure.contextWindow
