@@ -17,7 +17,13 @@ import {
 } from '@earendil-works/pi-tui'
 import type { ChatItem } from '../core/model.js'
 import { markdownTheme, reasoningMarkdownTheme, style } from './theme.js'
-import { renderContextBar, sandboxShort, shortTokens } from '../core/format.js'
+import {
+  gitLabel,
+  highlightMatches,
+  renderContextBar,
+  sandboxShort,
+  shortTokens,
+} from '../core/format.js'
 
 /**
  * Collapsed reasoning label; expanded renders the markdown body. While the
@@ -34,6 +40,7 @@ export class ReasoningView extends Container {
   private expanded = false
   private lastText = ''
   private lastMode: 'label' | 'markdown' | 'plain' | undefined
+  private lastQuery = ''
   private item: ChatItem
 
   constructor(item: ChatItem) {
@@ -44,17 +51,25 @@ export class ReasoningView extends Container {
     this.plain = new Text('', 1, 0)
   }
 
-  updateFromItem(expanded: boolean): void {
+  updateFromItem(expanded: boolean, query?: string): void {
     this.expanded = expanded
     const mode: 'label' | 'markdown' | 'plain' = this.item.streaming
       ? 'plain'
       : expanded
         ? 'markdown'
         : 'label'
-    if (this.lastMode !== mode || this.lastText !== this.item.text) {
+    const activeQuery = query ?? ''
+    // Streamed (plain) reasoning highlights matches; collapsed labels stay
+    // labels and expanded markdown cannot highlight — a find does not change
+    // the reasoning layout.
+    if (
+      this.lastMode !== mode ||
+      this.lastText !== this.item.text ||
+      this.lastQuery !== activeQuery
+    ) {
       this.clear()
       if (mode === 'plain') {
-        this.plain.setText(this.item.text)
+        this.plain.setText(highlightMatches(this.item.text, activeQuery))
         this.addChild(this.plain)
       } else if (mode === 'markdown') {
         this.body.setText(this.item.text)
@@ -65,23 +80,27 @@ export class ReasoningView extends Container {
       }
       this.lastMode = mode
       this.lastText = this.item.text
+      this.lastQuery = activeQuery
     }
   }
 }
 
 export class UserMessageView extends Text {
   private item: ChatItem
-  private lastText = ''
+  private lastKey = ''
 
   constructor(item: ChatItem) {
     super('', 1, 0)
     this.item = item
   }
 
-  updateFromItem(): void {
-    if (this.lastText !== this.item.text) {
-      this.setText(`${style.userPrefix('❯')} ${style.userText(this.item.text)}`)
-      this.lastText = this.item.text
+  updateFromItem(query?: string): void {
+    const key = `${this.item.text}:${query ?? ''}`
+    if (key !== this.lastKey) {
+      this.setText(
+        `${style.userPrefix('❯')} ${style.userText(highlightMatches(this.item.text, query ?? ''))}`,
+      )
+      this.lastKey = key
     }
   }
 }
@@ -90,8 +109,7 @@ export class AssistantMessageView extends Container {
   private markdown: Markdown
   private plain: Text
   private item: ChatItem
-  private lastText = ''
-  private lastStreaming = true
+  private lastKey = ''
 
   constructor(item: ChatItem) {
     super()
@@ -100,20 +118,23 @@ export class AssistantMessageView extends Container {
     this.plain = new Text('', 1, 0)
   }
 
-  updateFromItem(): void {
+  updateFromItem(query?: string): void {
     // Stream as plain wrapped text (stable, monotonic growth); apply markdown
-    // only once sealed. See ReasoningView for the flicker rationale.
-    if (this.lastText !== this.item.text || this.lastStreaming !== this.item.streaming) {
+    // only once sealed — unless a find is active, which highlights matches in
+    // plain text instead. See ReasoningView for the flicker rationale.
+    const activeQuery = query ?? ''
+    const usePlain = this.item.streaming || activeQuery !== ''
+    const key = `${this.item.text}:${this.item.streaming}:${activeQuery}`
+    if (key !== this.lastKey) {
       this.clear()
-      if (this.item.streaming) {
-        this.plain.setText(this.item.text)
+      if (usePlain) {
+        this.plain.setText(highlightMatches(this.item.text, activeQuery))
         this.addChild(this.plain)
       } else {
         this.markdown.setText(this.item.text)
         this.addChild(this.markdown)
       }
-      this.lastText = this.item.text
-      this.lastStreaming = this.item.streaming
+      this.lastKey = key
     }
   }
 }
@@ -155,6 +176,9 @@ export class ToolCardView implements Component {
   private item: ChatItem
   private lastRender: string | undefined
   private expand = false
+  private query = ''
+  /** Browse-mode focus ring marker (Tab with an empty editor). */
+  private focused = false
   private images: { base64: string; mediaType: string }[] = []
   /** Cached Image components: a fresh `Image` per render allocates a new
    * kitty image id every frame, churning the graphics protocol and forcing
@@ -168,8 +192,14 @@ export class ToolCardView implements Component {
     this.item = item
   }
 
-  updateFromItem(expand: boolean): void {
+  updateFromItem(expand: boolean, query?: string): void {
     this.expand = expand
+    this.query = query ?? ''
+  }
+
+  /** Browse-mode focus ring: accent border when focused. */
+  setFocused(focused: boolean): void {
+    this.focused = focused
   }
 
   /** Resolved inline images (filled by the screen after read_image results). */
@@ -183,7 +213,7 @@ export class ToolCardView implements Component {
     const tool = this.item.tool
     if (tool === undefined) return []
     const inner = Math.max(10, width - 4)
-    const border = style.toolBorder('│')
+    const border = this.focused ? style.accent('│') : style.toolBorder('│')
     const lines: string[] = []
     const statusLine = (() => {
       if (tool.status === 'running') {
@@ -232,7 +262,7 @@ export class ToolCardView implements Component {
         // capped at a generous height for very large results.
         const fullLines = body.split('\n').slice(0, 50)
         for (const line of fullLines) {
-          lines.push(`${border} ${truncate(style.toolResult(line))}`)
+          lines.push(`${border} ${truncate(style.toolResult(highlightMatches(line, this.query)))}`)
         }
       }
     }
@@ -314,6 +344,7 @@ export interface StatusBarData {
   model?: string
   sessionId?: string
   cwd?: string
+  git?: { branch: string; dirty: boolean }
   tokens?: { input: number; output: number }
   todos?: { done: number; total: number }
   title?: string
@@ -346,6 +377,9 @@ export class StatusBar implements Component {
     if (data.goalPhase !== undefined) parts.push(`◈${data.goalPhase}`)
     if (data.sessionId !== undefined) parts.push(data.sessionId.slice(0, 8))
     if (data.cwd !== undefined) parts.push(data.cwd)
+    if (data.git !== undefined) {
+      parts.push(gitLabel(data.git.branch, data.git.dirty))
+    }
     if (data.tokens !== undefined) {
       parts.push(`in ${shortTokens(data.tokens.input)} out ${shortTokens(data.tokens.output)}`)
     }
@@ -395,10 +429,11 @@ export function updateView(
   item: ChatItem,
   expandReasoning: boolean,
   expandTools: boolean,
+  query?: string,
 ): void {
-  if (view instanceof UserMessageView) view.updateFromItem()
-  else if (view instanceof AssistantMessageView) view.updateFromItem()
-  else if (view instanceof ReasoningView) view.updateFromItem(expandReasoning)
+  if (view instanceof UserMessageView) view.updateFromItem(query)
+  else if (view instanceof AssistantMessageView) view.updateFromItem(query)
+  else if (view instanceof ReasoningView) view.updateFromItem(expandReasoning, query)
   else if (view instanceof NoticeView) view.updateFromItem()
-  else if (view instanceof ToolCardView) view.updateFromItem(expandTools)
+  else if (view instanceof ToolCardView) view.updateFromItem(expandTools, query)
 }

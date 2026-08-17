@@ -27,6 +27,35 @@ export function ellipsize(text: string, maxWidth: number): string {
   return `${text.slice(0, maxWidth - 1)}…`
 }
 
+/**
+ * Wrap every case-insensitive occurrence of `query` in `text` with a
+ * yellow-underline highlight (the transcript-search marker). A blank query
+ * returns the text unchanged; used by the views only while a find is active.
+ */
+export function highlightMatches(text: string, query: string): string {
+  const needle = query.trim().toLowerCase()
+  if (needle === '' || text === '') return text
+  const lower = text.toLowerCase()
+  const out: string[] = []
+  let cursor = 0
+  while (cursor < text.length) {
+    const at = lower.indexOf(needle, cursor)
+    if (at === -1) {
+      out.push(text.slice(cursor))
+      break
+    }
+    if (at > cursor) out.push(text.slice(cursor, at))
+    out.push(chalk.underline.yellow(text.slice(at, at + needle.length)))
+    cursor = at + needle.length
+  }
+  return out.join('')
+}
+
+/** Status-bar git segment: `git:main*` (star = dirty working tree). */
+export function gitLabel(branch: string, dirty: boolean): string {
+  return `git:${branch}${dirty ? '*' : ''}`
+}
+
 /** Human-readable token count (12345 → '12k', 1234567 → '1.2M'). */
 export function shortTokens(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`

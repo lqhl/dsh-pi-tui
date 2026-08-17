@@ -9,7 +9,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { TuiAltScreen, type ViewportTUI } from '@earendil-works/pi-tui'
 import { parseArgs, USAGE } from './args.js'
-import { listPresets, listSessions, resolveAgent, type ResolvedAgent } from './core/session.js'
+import {
+  listPresets,
+  listSessions,
+  resolveAgent,
+  sessionTitles,
+  type ResolvedAgent,
+} from './core/session.js'
 import { AgentDefaultModelService } from './core/services.js'
 import { ClipboardTerminal } from './ui/clipboard-terminal.js'
 import { pickSession } from './ui/session-picker.js'
@@ -91,7 +97,8 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   let sessionId = args.resumeId ?? sessionConfig
   if (sessionId === undefined && args.pickSession) {
     const headers = await listSessions(ctx)
-    sessionId = await pickSession(tui, headers)
+    const titles = await sessionTitles(ctx, headers)
+    sessionId = await pickSession(tui, headers, titles)
   }
 
   const resolved = await resolveAgent(ctx, sessionId, agentOptions, meta)
@@ -148,6 +155,9 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   }
   // ↑/↓ history: seed the editor from the replayed session transcript.
   screen.seedHistory()
+  // Boot hint: tell the user persisted history is one Ctrl+R / /resume away
+  // (after replay, so the hint lands below the transcript, above live input).
+  screen.pushRecentSessionHint()
 
   ctx.on('session/event', (session, event) => {
     if (screenOwns(session.id)) {

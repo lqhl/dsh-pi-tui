@@ -63,15 +63,18 @@ Usage:
   dsh --profile pi-tui --help          this help
 
 Keys:
-  Esc        interrupt · cancel autocomplete
+  Esc        interrupt · cancel autocomplete · exit card browse
   Ctrl+C     running→interrupt · text→clear · empty→again exits
   Ctrl+D     exit when the editor is empty
   Ctrl+T     toggle thinking display
   Ctrl+O     toggle full tool output
+  Ctrl+F     find in transcript · Alt+C copy last assistant
   Ctrl+L     model picker · Ctrl+X cycle thinking
   Ctrl+R     search message history · Shift+Tab cycle mode
   Ctrl+Z     suspend to background
+  Ctrl+G     edit input in $EDITOR
   Tab        complete paths · / slash commands · @ attach files
+             (empty editor: cycle tool-card focus · Enter expand)
 
 Commands:
   /new                    start a fresh session
@@ -84,6 +87,9 @@ Commands:
   /agents                 list live subagents
   /jobs                   list background jobs
   /export                 write this transcript to a markdown file
-  /permission <ws|ro|danger>  switch sandbox mode
+  /rename <title>         rename this session
+  /copy last|tool|error|id|resume   copy to clipboard
+  /retry                  re-send the last prompt after a failure
+  /expand-all             toggle folding of old messages
   /hotkeys                this key table
   /compact /goal /plan /feedback   official dsh commands`

@@ -70,6 +70,8 @@ export interface ChatModel {
   effort?: string
   /** Provider/model route the last request actually used. */
   route?: { provider?: string; model?: string }
+  /** Last plain human prompt — the `/retry` target. */
+  lastUserText?: string
   /** Open streaming items for O(1) chunk folding (internal, not rendered). */
   openAssistant?: ChatItem
   openReasoning?: ChatItem
@@ -207,6 +209,7 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       if (event.data.source.kind !== 'user') break
       const text = textOf(event.data.content)
       if (text) {
+        model.lastUserText = text
         push({ kind: 'user', text, streaming: false, seq: event.seq })
       }
       break
@@ -367,9 +370,29 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       break
     }
     default:
+      // Plugin-merged events (e.g. `session/title` from the harness's
+      // session-title row) are outside the local SessionEventMap; fold the
+      // ones we render without widening the union.
+      foldPluginEvent(model, event)
       break
   }
   return model
+}
+
+/**
+ * Fold plugin-merged session events the local dsh-session types do not
+ * declare. Current surface: `session/title` feeds the status bar's title
+ * segment (official auto-titles and `/rename` both land here on replay).
+ */
+function foldPluginEvent(model: ChatModel, event: SessionEvent): void {
+  const raw = event as unknown as { type?: string; data?: { title?: unknown } }
+  if (
+    raw.type === 'session/title' &&
+    typeof raw.data?.title === 'string' &&
+    raw.data.title !== ''
+  ) {
+    model.title = raw.data.title
+  }
 }
 
 /** The open streaming item of a kind for the current step, or a fresh one.

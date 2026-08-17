@@ -455,3 +455,40 @@ test('tool results keep the full text for expansion', () => {
   assert.equal(card?.resultFull, long)
   assert.ok((card?.resultPreview ?? '').length <= long.length)
 })
+
+test('tracks the last plain user prompt for /retry', () => {
+  const model = createModel()
+  applyEvent(
+    model,
+    event('user/message', {
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'first prompt' }],
+    }),
+  )
+  applyEvent(
+    model,
+    event('user/message', {
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'second prompt' }],
+    }),
+  )
+  assert.equal(model.lastUserText, 'second prompt')
+  // Injected context (goal/skill/plugin) is not a retry target.
+  applyEvent(
+    model,
+    event('user/message', {
+      source: { kind: 'plugin', plugin: 'compact' },
+      content: [{ type: 'text', text: 'summary' }],
+    }),
+  )
+  assert.equal(model.lastUserText, 'second prompt')
+})
+
+test('folds plugin-merged session/title events into the model title', () => {
+  const model = createModel()
+  applyEvent(model, event('session/title', { title: '评审会话' }))
+  assert.equal(model.title, '评审会话')
+  // Empty titles are ignored.
+  applyEvent(model, event('session/title', { title: '' }))
+  assert.equal(model.title, '评审会话')
+})

@@ -45,15 +45,22 @@ function formatTime(epochMs: number): string {
 export function pickSession(
   tui: TUI,
   headers: readonly SessionHeader[],
+  titles?: ReadonlyMap<string, string>,
 ): Promise<string | undefined> {
   return new Promise((resolve) => {
     const items = [
       { value: '', label: '＋ New session', description: 'start fresh' },
-      ...headers.map((header) => ({
-        value: String(header.id),
-        label: basename(header.cwd ?? '') || `session ${String(header.id).slice(0, 8)}`,
-        description: `${String(header.id).slice(0, 8)} · ${formatTime(header.createdAt)}`,
-      })),
+      ...headers.map((header) => {
+        const id = String(header.id)
+        const title = titles?.get(id)
+        return {
+          value: id,
+          label: title ?? (basename(header.cwd ?? '') || `session ${id.slice(0, 8)}`),
+          description: `${id.slice(0, 8)} · ${formatTime(header.createdAt)}${
+            title !== undefined ? ` · ${basename(header.cwd ?? '') || 'no cwd'}` : ''
+          }`,
+        }
+      }),
     ]
     const picker = new SessionPicker('Resume a session', items)
     const handle = tui.showOverlay(picker, { width: '70%', maxHeight: '60%' })

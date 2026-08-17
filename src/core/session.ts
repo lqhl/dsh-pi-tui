@@ -250,6 +250,57 @@ export async function listSessions(ctx: Context): Promise<SessionHeader[]> {
   }
 }
 
+/**
+ * Last `session/title` value in a persisted session's log, or undefined.
+ * Mirrors `persistedPreset`'s bounded scan; the picker shows titles instead
+ * of bare `basename(cwd)` labels.
+ */
+export async function persistedTitle(ctx: Context, id: string): Promise<string | undefined> {
+  try {
+    const persistence = ctx.get('sessionPersistence') as
+      | {
+          load(id: unknown): Promise<{
+            events: readonly { type?: string; data?: { title?: unknown } }[]
+          }>
+        }
+      | undefined
+    const loaded = await persistence?.load(SessionId(id))
+    if (loaded === undefined) return undefined
+    for (let index = loaded.events.length - 1; index >= 0; index -= 1) {
+      const event = loaded.events[index]
+      if (
+        event.type === 'session/title' &&
+        typeof event.data?.title === 'string' &&
+        event.data.title !== ''
+      ) {
+        return event.data.title
+      }
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Titles for the newest `limit` headers, keyed by session id (sessions with
+ * no title are absent). Loading full logs is I/O, so callers bound it —
+ * boot/resume pickers pass the already-sorted, already-capped header list.
+ */
+export async function sessionTitles(
+  ctx: Context,
+  headers: readonly SessionHeader[],
+  limit = 15,
+): Promise<Map<string, string>> {
+  const titles = new Map<string, string>()
+  for (const header of headers.slice(0, limit)) {
+    const id = String(header.id)
+    const title = await persistedTitle(ctx, id)
+    if (title !== undefined) titles.set(id, title)
+  }
+  return titles
+}
+
 export interface PresetInfo {
   id: string
   name?: string

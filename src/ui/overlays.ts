@@ -509,3 +509,123 @@ function textStep(
   input.onEscape = () => finish(undefined)
   return handle
 }
+
+/**
+ * Live "find in transcript" overlay: an Input whose every change re-runs the
+ * caller's search and live-jumps to the first match; ↑/↓ (and PgUp/PgDn)
+ * cycle through matches, Enter re-jumps to the current one, Esc closes
+ * (the highlight stays until the caller clears it).
+ */
+export function openFindOverlay(
+  tui: TUI,
+  options: {
+    /** Re-run the search for `query`; returns the match count. */
+    search(query: string): number
+    /** Jump to the match at `index` (scroll + highlight). */
+    jump(index: number): void
+    /** Initial query to prefill (a previous find's query, or ''). */
+    initialQuery?: string
+  },
+): Promise<void> {
+  return new Promise((resolve) => {
+    const search = new Input()
+    const panel = new FindPanel(
+      search,
+      (query) => options.search(query),
+      (index) => options.jump(index),
+      options.initialQuery ?? '',
+    )
+    const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '30%' })
+    panel.onClose = () => {
+      handle.hide()
+      resolve()
+    }
+    tui.requestRender()
+  })
+}
+
+class FindPanel extends Container {
+  private readonly search: Input
+  private readonly searchFn: (query: string) => number
+  private readonly jumpFn: (index: number) => void
+  private readonly footer: Text
+  private count = 0
+  private index = 0
+  onClose: (() => void) | undefined
+
+  constructor(
+    search: Input,
+    searchFn: (query: string) => number,
+    jumpFn: (index: number) => void,
+    initialQuery: string,
+  ) {
+    super()
+    this.search = search
+    this.searchFn = searchFn
+    this.jumpFn = jumpFn
+    this.footer = new Text('', 1, 0)
+    this.addChild(new Text(style.accent('Find in transcript'), 1, 0))
+    this.addChild(this.search)
+    this.addChild(this.footer)
+    this.search.setValue(initialQuery)
+    this.refresh(initialQuery)
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, 'up')) {
+      this.move(-1)
+      return
+    }
+    if (matchesKey(data, 'down')) {
+      this.move(1)
+      return
+    }
+    if (matchesKey(data, 'pageUp')) {
+      this.move(-5)
+      return
+    }
+    if (matchesKey(data, 'pageDown')) {
+      this.move(5)
+      return
+    }
+    if (matchesKey(data, 'enter')) {
+      // Enter: re-jump to the current match and stay in the find bar.
+      if (this.count > 0) this.jumpFn(this.index)
+      return
+    }
+    if (matchesKey(data, 'escape')) {
+      this.onClose?.()
+      return
+    }
+    // Everything else (printable, backspace, word ops) feeds the search box,
+    // then re-runs the search and live-jumps to the first match.
+    this.search.handleInput(data)
+    this.refresh(this.search.getValue())
+  }
+
+  private refresh(query: string): void {
+    this.count = this.searchFn(query)
+    this.index = this.count > 0 ? 0 : -1
+    this.updateFooter()
+    if (this.count > 0) this.jumpFn(0)
+  }
+
+  private move(delta: number): void {
+    if (this.count === 0) return
+    this.index = (this.index + delta + this.count) % this.count
+    this.updateFooter()
+    this.jumpFn(this.index)
+  }
+
+  private updateFooter(): void {
+    if (this.count === 0) {
+      this.footer.setText(style.statusBar('no matches — keep typing or Esc'))
+      return
+    }
+    this.footer.setText(
+      style.statusBar(
+        `${this.index + 1}/${this.count} match${this.count === 1 ? '' : 'es'} — ↑/↓ cycle · Enter jump · Esc close`,
+      ),
+    )
+  }
+}

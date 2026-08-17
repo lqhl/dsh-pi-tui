@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { decodeOsc52 } from '../src/core/clipboard.js'
+import { decodeOsc52, osc52Encode } from '../src/core/clipboard.js'
 
 function osc52(text: string, selection = 'c'): string {
   return `\x1b]52;${selection};${Buffer.from(text, 'utf8').toString('base64')}\x07`
@@ -25,4 +25,19 @@ test('decodeOsc52 decodes multiple sequences in one write', () => {
 
 test('decodeOsc52 skips empty payloads', () => {
   assert.deepEqual(decodeOsc52(`\x1b]52;c;\x07`), [])
+})
+
+test('osc52Encode round-trips through decodeOsc52', () => {
+  assert.deepEqual(decodeOsc52(osc52Encode('hello world')), ['hello world'])
+})
+
+test('osc52Encode round-trips UTF-8', () => {
+  const text = '中文 · emoji 🎉'
+  assert.deepEqual(decodeOsc52(osc52Encode(text)), [text])
+})
+
+test('osc52Encode targets the default clipboard selection', () => {
+  const encoded = osc52Encode('x')
+  assert.ok(encoded.startsWith('\x1b]52;c;'))
+  assert.ok(encoded.endsWith('\x07'))
 })

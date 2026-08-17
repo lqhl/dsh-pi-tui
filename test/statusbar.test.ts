@@ -73,3 +73,27 @@ test('status bar renders sandbox mode and context bar with totals', async () => 
   assert.ok(output.includes('12k/27k'))
   assert.ok(visibleWidth(bar.render(terminal.width)[0]) <= terminal.width)
 })
+
+test('status bar renders the git branch segment with dirty marker', async () => {
+  const terminal = new MockTerminal()
+  terminal.width = 200
+  const bar = new StatusBar()
+  bar.update({
+    model: 'deepseek-v4-flash',
+    sessionId: 'abc12345-xxxx',
+    cwd: 'repo',
+    git: { branch: 'main', dirty: true },
+  })
+  const output = stripAnsi(bar.render(terminal.width)[0])
+  assert.ok(output.includes('git:main*'))
+  assert.ok(visibleWidth(bar.render(terminal.width)[0]) <= terminal.width)
+})
+
+test('status bar omits the git segment when absent', async () => {
+  const terminal = new MockTerminal()
+  terminal.width = 200
+  const bar = new StatusBar()
+  bar.update({ model: 'deepseek-v4-flash', sessionId: 'abc12345-xxxx', cwd: 'repo' })
+  const output = stripAnsi(bar.render(terminal.width)[0])
+  assert.ok(!output.includes('git:'))
+})

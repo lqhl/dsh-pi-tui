@@ -19,43 +19,48 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 
 ## 键位
 
-| 按键        | 功能                                                              |
-| ----------- | ----------------------------------------------------------------- |
-| `Enter`     | 提交（`Shift+Enter` 换行）                                        |
-| `Esc`       | 中断当前 turn / 取消自动补全                                      |
-| `Ctrl+C`    | 运行中→中断；有文字→清空；已空→再次按下退出                       |
-| `Ctrl+D`    | 编辑器为空时退出（非空时删除字符）                                |
-| `Ctrl+T`    | 展开/折叠 thinking 块                                             |
-| `Ctrl+O`    | 展开/折叠工具完整输出 / diff                                      |
-| `Ctrl+L`    | 打开模型选择器                                                    |
-| `Ctrl+R`    | 搜索消息历史：本会话 + 最近持久化会话的首条消息（选中载入输入框） |
-| `↑` / `↓`   | 浏览当前会话的消息历史（恢复/切换后自动载入）                     |
-| `Ctrl+Z`    | 挂起到后台（`fg` 恢复）                                           |
-| `Ctrl+G`    | 用 `$EDITOR` 编辑输入                                             |
-| `Shift+Tab` | 循环会话 mode（normal ↔ plan）                                    |
-| `Ctrl+X`    | 循环思考强度（off→high→max）                                      |
-| `Tab`       | 补全（slash 命令 / 路径型 token；普通单词不触发）                 |
-| `@`         | 文件提及菜单（搜索框 fuzzy 过滤，选中即插入）                     |
-| `!` / `!!`  | 直接执行 shell 命令（用户全权；`!!` 输出不进模型上下文）          |
+| 按键        | 功能                                                                                          |
+| ----------- | --------------------------------------------------------------------------------------------- |
+| `Enter`     | 提交（`Shift+Enter` 换行）                                                                    |
+| `Esc`       | 中断当前 turn / 取消自动补全 / 退出工具卡片浏览 / 清除搜索高亮                                |
+| `Ctrl+C`    | 运行中→中断；有文字→清空；已空→再次按下退出                                                   |
+| `Ctrl+D`    | 编辑器为空时退出（非空时删除字符）                                                            |
+| `Ctrl+T`    | 展开/折叠 thinking 块                                                                         |
+| `Ctrl+O`    | 展开/折叠工具完整输出 / diff                                                                  |
+| `Ctrl+F`    | 在 transcript 内搜索（输入即跳转，↑/↓ 循环，Enter 确认，Esc 关闭）                            |
+| `Alt+C`     | 复制最后一条 assistant 消息（OSC 52 三路剪贴板）                                              |
+| `Ctrl+L`    | 打开模型选择器                                                                                |
+| `Ctrl+R`    | 搜索消息历史：本会话 + 最近持久化会话的首条消息（选中载入输入框）                             |
+| `↑` / `↓`   | 浏览当前会话的消息历史（恢复/切换后自动载入）                                                 |
+| `Ctrl+Z`    | 挂起到后台（`fg` 恢复）                                                                       |
+| `Ctrl+G`    | 用 `$EDITOR` 编辑输入                                                                         |
+| `Shift+Tab` | 循环会话 mode（normal ↔ plan）                                                                |
+| `Ctrl+X`    | 循环思考强度（off→high→max）                                                                  |
+| `Tab`       | 补全（slash 命令 / 路径型 token；普通单词不触发）；空编辑器时循环工具卡片焦点（`Enter` 展开） |
+| `@`         | 文件提及菜单（搜索框 fuzzy 过滤，选中即插入）                                                 |
+| `!` / `!!`  | 直接执行 shell 命令（用户全权；`!!` 输出不进模型上下文）                                      |
 
 ## 命令
 
-| 命令                                   | 功能                                                          |
-| -------------------------------------- | ------------------------------------------------------------- |
-| `/model [query]`                       | 切换模型（无参数弹选择器；下一步生效）                        |
-| `/thinking off\|high\|max`             | 设置思考强度（下一步生效）                                    |
-| `/skills`                              | 列出人类可调用技能                                            |
-| `/new`                                 | 新会话                                                        |
-| `/fork`                                | 当前会话末尾 fork（保留历史，记录 lineage）                   |
-| `/resume [query]`                      | 列出/恢复持久化会话                                           |
-| `/tree`                                | 子代理会话树                                                  |
-| `/agents`                              | 列出 live 子代理                                              |
-| `/jobs`                                | 列出后台任务                                                  |
-| `/export`                              | 导出 transcript 为 markdown                                   |
-| `/rename <title>`                      | 重命名会话（官方 sessionTitle 服务）                          |
-| `/permission [preset]`                 | 官方权限 preset 切换（workspace-write / danger-full-access…） |
-| `/hotkeys`                             | 显示键位表                                                    |
-| `/compact` `/goal` `/plan` `/feedback` | 官方 dsh 命令（自动发现）                                     |
+| 命令                                   | 功能                                                                |
+| -------------------------------------- | ------------------------------------------------------------------- |
+| `/model [query]`                       | 切换模型（无参数弹选择器；下一步生效）                              |
+| `/thinking off\|high\|max`             | 设置思考强度（下一步生效）                                          |
+| `/skills`                              | 列出人类可调用技能                                                  |
+| `/new`                                 | 新会话                                                              |
+| `/fork`                                | 当前会话末尾 fork（保留历史，记录 lineage）                         |
+| `/resume [query]`                      | 列出/恢复持久化会话                                                 |
+| `/tree`                                | 子代理会话树                                                        |
+| `/agents`                              | 列出 live 子代理                                                    |
+| `/jobs`                                | 列出后台任务                                                        |
+| `/export`                              | 导出 transcript 为 markdown                                         |
+| `/rename <title>`                      | 重命名会话（官方 sessionTitle 服务）                                |
+| `/copy last\|tool\|error\|id\|resume`  | 复制到剪贴板（assistant 文本 / 工具结果 / 错误 / id / resume 命令） |
+| `/retry`                               | turn 失败后重发最后一条人类提示                                     |
+| `/expand-all`                          | 切换长会话折叠（旧消息折叠，显示全部）                              |
+| `/permission [preset]`                 | 官方权限 preset 切换（workspace-write / danger-full-access…）       |
+| `/hotkeys`                             | 显示键位表                                                          |
+| `/compact` `/goal` `/plan` `/feedback` | 官方 dsh 命令（自动发现）                                           |
 
 模型/思考强度切换通过官方 `installModelSelection` 链路（与 web/grok 客户端同款），无需 fork 会话；会话与 web profile 共享 `~/.dsh/sessions` 持久化存储。
 
@@ -66,10 +71,12 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 - `read_image` 结果在 kitty/iTerm2 终端内联渲染图片（Ctrl+O 展开）
 - slash 命令：`/compact` `/goal` `/plan` `/feedback` 等全部来自官方 `ctx.commands` 注册表（自动补全 + 动态发现）
 - 权限审批弹窗（`approval/request`）与 `ask_user_question` 交互表单（选项/多选/自由文本；plan-review 特化弹窗）
-- 会话管理：创建、恢复、fork、子代理树、选择器（官方持久化后端）
-- 状态栏：provider/model、preset、plan 指示、goal 状态、上下文压力 `ctx N%`、会话 id、token 统计、todo 进度、后台任务计数（全部来自官方 projection/jobs 服务）
+- 会话管理：创建、恢复、fork、子代理树、选择器（官方持久化后端；resume 选择器显示官方自动标题）
+- 转录搜索：`Ctrl+F` 在 transcript 内搜索并跳转（输入即定位 + 高亮，↑/↓ 循环）；`/retry` 一键重发失败 turn；`/copy` 复制 assistant/工具结果/错误/id/resume 命令（OSC 52 三路剪贴板）
+- 长会话折叠：消息超过阈值自动折叠旧消息（`/expand-all` 展开）
+- 状态栏：provider/model、preset、plan 指示、goal 状态、上下文压力 `ctx N%`、会话 id、git 分支、token 统计、todo 进度、后台任务计数（全部来自官方 projection/jobs 服务）
 - 转场提示：compaction 检查点、turn 失败/中止/超长提示
-- 启动 banner：品牌蓝 ASCII 鲸鱼 + 会话信息 + 键位提示（boot 与会话切换时）
+- 启动 banner：品牌蓝 ASCII 鲸鱼 + 会话信息 + 键位提示 + 持久化会话提示（boot 与会话切换时）
 - 权限：官方 `/permission <preset>`（沙箱模式 + 审批策略捆绑切换），状态栏显示当前 preset
 
 ## 支持矩阵

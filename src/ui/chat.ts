@@ -33,6 +33,7 @@ import {
   Editor,
   Loader,
   ScrollView,
+  Text,
   TuiAltScreen,
   VStack,
   isKeyRelease,
@@ -41,14 +42,25 @@ import {
   type SlashCommand,
   type ViewportTUI,
 } from '@earendil-works/pi-tui'
-import { applyEvent, createModel, pushNotice, textOf, type ChatModel } from '../core/model.js'
+import {
+  applyEvent,
+  createModel,
+  pushNotice,
+  textOf,
+  type ChatItem,
+  type ChatModel,
+} from '../core/model.js'
 import { seedModelSelection } from '../core/selection.js'
+import { osc52Encode } from '../core/clipboard.js'
+import { readGitState, type GitState } from '../core/git.js'
+import { buildSearchIndex } from '../core/search.js'
 import {
   AgentDefaultModelService,
   JobsService,
   SessionProjectionsService,
 } from '../core/services.js'
 import { runRgFiles, shouldShowPath } from '../core/files.js'
+import { foldWindow, visibleItemsBefore, type FoldWindow } from '../core/fold.js'
 import {
   ctrlC,
   cycleEffort,
@@ -66,10 +78,12 @@ import {
   listSessions,
   resolveAgent,
   resumeCommand,
+  sessionTitles,
   type ResolvedAgent,
 } from '../core/session.js'
-import { pickFromListWithSearch } from './overlays.js'
+import { pickFromListWithSearch, openFindOverlay } from './overlays.js'
 import { buildBanner } from './banner.js'
+import type { TranscriptSearchMatch } from '../core/search.js'
 
 export interface ChatScreenOptions {
   ctx: Context
@@ -123,6 +137,21 @@ export class ChatScreen {
   private slashAbort: AbortController | undefined
   /** Last counted running background jobs (refreshed outside the chunk hot path). */
   private cachedJobsRunning: number | undefined
+  /** ScrollView over the transcript (Ctrl+F jump target). */
+  private transcriptScroll: ScrollView | undefined
+  /** Active find query — views highlight its matches while set. */
+  private searchQuery: string | undefined
+  /** Cached git state for the session cwd (boot + switch refresh only). */
+  private gitState: GitState | undefined
+  /** Browse-mode focus ring: the tool card id Tab focuses (empty editor). */
+  private focusedToolId: number | undefined
+  /** Per-card expand override toggled by Enter in browse mode. */
+  private expandedToolId: number | undefined
+  /** Long-session fold: render only the newest items above this line. */
+  private readonly FOLD_THRESHOLD = 200
+  private expandedAll = false
+  private foldNotice: Text | undefined
+  private lastFoldKey = ''
 
   constructor(options: ChatScreenOptions) {
     this.ctx = options.ctx
@@ -140,6 +169,9 @@ export class ChatScreen {
       this.submit(text)
     }
     this.editor.onChange = (text) => {
+      // Typing exits tool-card browse mode (the ring only applies to an
+      // empty editor).
+      if (text !== '' && this.focusedToolId !== undefined) this.exitBrowseMode()
       this.maybeOpenAtPicker(text)
     }
 
@@ -151,14 +183,15 @@ export class ChatScreen {
     // convention). The alternate-screen renderer diffs rows in place, so
     // content shrink (e.g. reasoning collapsing at seal) no longer triggers
     // the whole-screen + scrollback clear that TuiMainScreen used.
+    this.transcriptScroll = new ScrollView(this.messages, {
+      follow: 'end',
+      primary: true,
+      overscroll: 'chain',
+    })
     this.tui.setLayoutRoot(
       new VStack([
         {
-          component: new ScrollView(this.messages, {
-            follow: 'end',
-            primary: true,
-            overscroll: 'chain',
-          }),
+          component: this.transcriptScroll,
           basis: 0,
           grow: 1,
           minSize: 1,
@@ -192,6 +225,18 @@ export class ChatScreen {
         if (this.isWorking()) {
           this.interrupt()
           return { consume: true }
+        }
+        // Browse mode / find highlight: Esc exits both (idle only, and only
+        // when no overlay is open — overlays own Esc themselves).
+        if (!this.tui.hasOverlay()) {
+          if (this.focusedToolId !== undefined || this.expandedToolId !== undefined) {
+            this.exitBrowseMode()
+            return { consume: true }
+          }
+          if (this.searchQuery !== undefined) {
+            this.clearFindHighlight()
+            return { consume: true }
+          }
         }
         return undefined // editor cancels autocomplete, overlays close
       }
@@ -250,12 +295,40 @@ export class ChatScreen {
         void this.cycleThinking()
         return { consume: true }
       }
+      if (matchesKey(data, 'ctrl+f')) {
+        if (!this.tui.hasOverlay()) void this.cmdFindInTranscript()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'alt+c')) {
+        if (!this.tui.hasOverlay()) this.copyLastAssistant()
+        return { consume: true }
+      }
+      if (matchesKey(data, 'enter')) {
+        // Browse mode owns Enter while a tool card is focused (empty editor
+        // makes plain Enter a no-op anyway); overlays own Enter themselves.
+        if (this.focusedToolId !== undefined && !this.tui.hasOverlay()) {
+          this.toggleFocusedTool()
+          return { consume: true }
+        }
+        return undefined
+      }
+      if (matchesKey(data, 'tab')) {
+        // Empty editor + settled tool cards: Tab cycles the browse focus
+        // ring; with text it stays autocomplete (PathAware gate makes Tab a
+        // no-op on plain words anyway).
+        if (this.editor.getText() === '' && !this.tui.hasOverlay()) {
+          this.cycleToolFocus()
+          return { consume: true }
+        }
+        return undefined
+      }
       return undefined
     })
 
     this.showBanner()
     this.tui.terminal.setTitle(`dsh-pi-tui · ${basename(this.cwd)}`)
     this.sync()
+    this.refreshGitState()
     // NOTE: the app layer already started the TUI (it must be live for the
     // boot-time session picker overlay); starting again would attach a
     // second stdin data listener and duplicate every keystroke.
@@ -336,6 +409,12 @@ export class ChatScreen {
     this.model = createModel()
     this.views.clear()
     this.messages.clear()
+    // Per-session UI state does not survive a switch.
+    this.lastFoldKey = ''
+    this.searchQuery = undefined
+    this.focusedToolId = undefined
+    this.expandedToolId = undefined
+    this.expandedAll = false
     this.showBanner()
     if (this.workingLoader !== undefined) {
       this.workingLoader.stop()
@@ -350,6 +429,7 @@ export class ChatScreen {
     this.rebuildAutocomplete()
     this.tui.terminal.setTitle(`dsh-pi-tui · ${basename(this.cwd)}`)
     this.sync()
+    this.refreshGitState()
   }
 
   /** Welcome block at the top of the transcript (boot and every switch). */
@@ -408,6 +488,12 @@ export class ChatScreen {
       { name: 'export', description: 'Write this transcript to a markdown file' },
       { name: 'rename', description: 'Rename this session' },
       { name: 'hotkeys', description: 'Show key bindings' },
+      {
+        name: 'copy',
+        description: 'Copy to clipboard: last|tool|error|id|resume',
+      },
+      { name: 'retry', description: 'Re-send the last prompt after a failure' },
+      { name: 'expand-all', description: 'Toggle folding of old messages' },
     ]
     this.editor.setAutocompleteProvider(
       new PathAwareAutocomplete(new CombinedAutocompleteProvider(slashCommands, this.cwd)),
@@ -517,14 +603,21 @@ export class ChatScreen {
         this.pushNotice('no persisted sessions')
         return
       }
+      const titles = await sessionTitles(this.ctx, headers)
       target =
         (await pickFromListWithSearch(this.tui, {
           title: 'Resume session',
-          items: headers.map((header) => ({
-            value: String(header.id),
-            label: `${basename(header.cwd ?? '')} · ${String(header.id).slice(0, 8)}`,
-            description: new Date(header.createdAt).toLocaleString(),
-          })),
+          items: headers.map((header) => {
+            const id = String(header.id)
+            const title = titles.get(id)
+            return {
+              value: id,
+              label: title ?? (basename(header.cwd ?? '') || `session ${id.slice(0, 8)}`),
+              description: `${id.slice(0, 8)} · ${new Date(header.createdAt).toLocaleString()}${
+                title !== undefined && header.cwd !== undefined ? ` · ${basename(header.cwd)}` : ''
+              }`,
+            }
+          }),
         })) ?? ''
     }
     if (target === '') return
@@ -689,6 +782,9 @@ export class ChatScreen {
     if (parsed.name === 'export') return this.cmdExport()
     if (parsed.name === 'rename') return this.cmdRename(parsed.raw.trim())
     if (parsed.name === 'hotkeys') return this.cmdHotkeys()
+    if (parsed.name === 'copy') return this.cmdCopy(parsed.raw.trim())
+    if (parsed.name === 'retry') return this.cmdRetry()
+    if (parsed.name === 'expand-all') return this.cmdExpandAll()
 
     if (await this.executeCommand(line)) return
 
@@ -990,19 +1086,295 @@ export class ChatScreen {
     this.pushNotice(
       [
         'keys:',
-        '  Esc        interrupt · cancel autocomplete',
+        '  Esc        interrupt · cancel autocomplete · exit card browse',
         '  Ctrl+C     running→interrupt · text→clear · empty→again exits',
         '  Ctrl+D     exit when the editor is empty',
         '  Ctrl+T     toggle thinking display',
         '  Ctrl+O     toggle full tool output / diff',
+        '  Ctrl+F     find in transcript · Alt+C copy last assistant',
         '  Ctrl+L     model picker · Ctrl+X cycle thinking',
         '  Ctrl+R     search message history · Shift+Tab cycle mode',
         '  Ctrl+Z     suspend to background',
         '  Ctrl+G     edit input in $EDITOR',
         '  Tab        complete paths · / slash commands · @ attach files',
-        'commands: /new /fork /resume /tree /model /thinking /skills /agents /jobs /export /rename /hotkeys',
+        '             (empty editor: cycle tool-card focus · Enter expand)',
+        'commands: /new /fork /resume /tree /model /thinking /skills /agents /jobs /export /rename /copy /retry /expand-all /hotkeys',
       ].join('\n'),
     )
+  }
+
+  // ── find in transcript ────────────────────────────────────────────────────
+
+  /** Cache of the latest find, kept in sync with `searchQuery`. */
+  private findMatches: TranscriptSearchMatch[] = []
+
+  /**
+   * Ctrl+F: search the transcript and jump to matches. The overlay re-runs
+   * the search per keystroke and live-jumps to the first match; ↑/↓ cycle;
+   * Esc closes (the highlight persists, Esc again clears it).
+   */
+  private async cmdFindInTranscript(): Promise<void> {
+    if (this.model.items.length === 0) {
+      this.pushNotice('nothing to search yet')
+      return
+    }
+    this.findMatches = buildSearchIndex(this.model.items, this.searchQuery ?? '')
+    await openFindOverlay(this.tui, {
+      initialQuery: this.searchQuery ?? '',
+      search: (query) => {
+        this.searchQuery = query.trim() === '' ? undefined : query
+        this.findMatches = buildSearchIndex(this.model.items, query)
+        this.sync()
+        return this.findMatches.length
+      },
+      jump: (index) => {
+        const match = this.findMatches[index]
+        if (match !== undefined) this.jumpToMatch(match.itemId)
+      },
+    })
+  }
+
+  /** Scroll the transcript so the matched item sits at the top, highlighted. */
+  private jumpToMatch(itemId: number): void {
+    // A match below the fold boundary is invisible; expand to reveal it.
+    const window = foldWindow(this.model.items.length, this.expandedAll, this.FOLD_THRESHOLD)
+    if (window.key.startsWith('folded:') && itemId < window.boundary) {
+      this.expandedAll = true
+    }
+    this.sync()
+    const width = this.tui.terminal.columns
+    this.transcriptScroll?.scrollTo(this.measureOffset(itemId, width))
+    this.tui.requestRender()
+  }
+
+  /**
+   * Sum of rendered line heights of every VISIBLE view before `targetId`
+   * (views are keyed by sequential item id, so Map order is transcript
+   * order). Folded views are not rendered by the layout, so they are
+   * skipped and the fold notice's height is added — the result matches
+   * exactly what the ScrollView content shows.
+   */
+  private measureOffset(targetId: number, width: number): number {
+    const window = foldWindow(this.model.items.length, this.expandedAll, this.FOLD_THRESHOLD)
+    return visibleItemsBefore(
+      targetId,
+      window,
+      (id) => {
+        const view = this.views.get(id)
+        return view !== undefined ? view.render(width).length : 0
+      },
+      this.foldNotice !== undefined ? this.foldNotice.render(width).length : 1,
+    )
+  }
+
+  /** Esc with a find active: drop the highlight, restore normal rendering. */
+  private clearFindHighlight(): void {
+    this.searchQuery = undefined
+    this.sync()
+  }
+
+  // ── clipboard copy ────────────────────────────────────────────────────────
+
+  private copyToClipboard(text: string, label: string): void {
+    if (text === '') {
+      this.pushNotice('nothing to copy', 'error')
+      return
+    }
+    this.tui.terminal.write(osc52Encode(text))
+    this.pushNotice(`copied ${label} (${text.length} chars)`)
+  }
+
+  /** Newest non-empty assistant text, or undefined. */
+  private lastAssistantText(): string | undefined {
+    for (let index = this.model.items.length - 1; index >= 0; index -= 1) {
+      const item = this.model.items[index]
+      if (item.kind === 'assistant' && item.text !== '') return item.text
+    }
+    return undefined
+  }
+
+  /** Newest tool result (full when available, else the preview), or undefined. */
+  private lastToolResult(): string | undefined {
+    for (let index = this.model.items.length - 1; index >= 0; index -= 1) {
+      const item = this.model.items[index]
+      if (item.kind !== 'tool' || item.tool === undefined) continue
+      const full = item.tool.resultFull
+      if (full !== undefined && full !== '') return full
+      const preview = item.tool.resultPreview
+      if (preview !== undefined && preview !== '') return preview
+    }
+    return undefined
+  }
+
+  /** Newest error notice text, or undefined. */
+  private lastErrorText(): string | undefined {
+    for (let index = this.model.items.length - 1; index >= 0; index -= 1) {
+      const item = this.model.items[index]
+      if (item.kind === 'notice' && item.notice === 'error' && item.text !== '') return item.text
+    }
+    return undefined
+  }
+
+  /** Alt+C: copy the newest assistant message. */
+  private copyLastAssistant(): void {
+    const text = this.lastAssistantText()
+    if (text === undefined) {
+      this.pushNotice('no assistant message to copy', 'error')
+      return
+    }
+    this.copyToClipboard(text, 'last assistant message')
+  }
+
+  private cmdCopy(sub: string): void {
+    switch (sub) {
+      case 'last':
+        this.copyLastAssistant()
+        return
+      case 'tool': {
+        const text = this.lastToolResult()
+        if (text === undefined) {
+          this.pushNotice('no tool result to copy', 'error')
+          return
+        }
+        this.copyToClipboard(text, 'last tool result')
+        return
+      }
+      case 'error': {
+        const text = this.lastErrorText()
+        if (text === undefined) {
+          this.pushNotice('no error to copy', 'error')
+          return
+        }
+        this.copyToClipboard(text, 'last error')
+        return
+      }
+      case 'id':
+        this.copyToClipboard(this.currentSessionId, 'session id')
+        return
+      case 'resume': {
+        if (this.agent.session.events.length === 0) {
+          this.pushNotice('session has no durable content yet', 'error')
+          return
+        }
+        this.copyToClipboard(resumeCommand(this.currentSessionId), 'resume command')
+        return
+      }
+      default:
+        this.pushNotice('usage: /copy last|tool|error|id|resume', 'error')
+    }
+  }
+
+  // ── retry / expand-all ────────────────────────────────────────────────────
+
+  /** Re-send the last plain human prompt (after a failed or aborted turn). */
+  private cmdRetry(): void {
+    const text = this.model.lastUserText
+    if (text === undefined || text === '') {
+      this.pushNotice('nothing to retry', 'error')
+      return
+    }
+    if (this.isBusy()) {
+      this.pushNotice('still working — press Esc to interrupt first', 'error')
+      return
+    }
+    this.followup(text)
+    this.pushNotice('retrying last prompt')
+  }
+
+  /** Toggle the long-session fold (show all messages / fold old ones). */
+  private cmdExpandAll(): void {
+    this.expandedAll = !this.expandedAll
+    this.pushNotice(this.expandedAll ? 'showing all messages' : 'folding old messages again')
+    this.sync()
+  }
+
+  // ── status bar git ────────────────────────────────────────────────────────
+
+  /** Refresh the git branch/dirty state for the session cwd (boot + switch). */
+  private refreshGitState(): void {
+    const cwd = this.cwd
+    this.gitState = undefined
+    void readGitState(cwd).then((state) => {
+      if (state === undefined || state === this.gitState) return
+      // A session switch may have changed the cwd while the read ran; the
+      // stale result must not paint the new session's status bar.
+      if (cwd !== this.cwd) return
+      this.gitState = state
+      this.sync(false)
+    })
+  }
+
+  // ── boot hint ─────────────────────────────────────────────────────────────
+
+  /**
+   * After boot replay, surface how many persisted sessions exist so users
+   * know history is one Ctrl+R / /resume away. Called once from the app
+   * layer (after the durable log replays), so the hint lands after history.
+   */
+  pushRecentSessionHint(): void {
+    void listSessions(this.ctx)
+      .then((headers) => {
+        const others = headers.filter((header) => String(header.id) !== this.currentSessionId)
+        if (others.length === 0) return
+        pushNotice(
+          this.model,
+          `${others.length} persisted session${others.length === 1 ? '' : 's'} — Ctrl+R to search · /resume to reopen`,
+          'info',
+        )
+        this.sync()
+      })
+      .catch(() => {
+        // Best effort.
+      })
+  }
+
+  // ── tool-card browse mode ─────────────────────────────────────────────────
+
+  /** Finished tool-card ids, newest last; folded cards are skipped. */
+  private settledToolIds(): number[] {
+    const { items } = this.model
+    const boundary = foldWindow(items.length, this.expandedAll, this.FOLD_THRESHOLD).boundary
+    const ids: number[] = []
+    for (const item of items) {
+      if (item.kind !== 'tool' || item.tool === undefined || item.tool.status === 'running') {
+        continue
+      }
+      if (item.id < boundary) continue
+      ids.push(item.id)
+    }
+    return ids
+  }
+
+  /** Tab with an empty editor: enter or advance the card focus ring. */
+  private cycleToolFocus(): void {
+    const ids = this.settledToolIds()
+    if (ids.length === 0) {
+      this.pushNotice('no finished tool cards to focus', 'error')
+      return
+    }
+    const entering = this.focusedToolId === undefined
+    const current = ids.indexOf(this.focusedToolId ?? -1)
+    this.focusedToolId = ids[(current + 1) % ids.length]
+    this.expandedToolId = undefined
+    if (entering) {
+      this.pushNotice('tool-card browse: Enter expand · Tab next · Esc exit')
+    }
+    this.sync()
+  }
+
+  /** Enter in browse mode: toggle the focused card's expansion. */
+  private toggleFocusedTool(): void {
+    if (this.focusedToolId === undefined) return
+    this.expandedToolId =
+      this.expandedToolId === this.focusedToolId ? undefined : this.focusedToolId
+    this.sync()
+  }
+
+  /** Esc in browse mode: drop the focus ring (and any per-card expansion). */
+  private exitBrowseMode(): void {
+    this.focusedToolId = undefined
+    this.expandedToolId = undefined
+    this.sync()
   }
 
   // ── ! shell command (user full authority) ──────────────────────────────────
@@ -1360,20 +1732,15 @@ export class ChatScreen {
   /** Create views for new items, refresh changed ones, fix the chrome. */
   private sync(refreshJobs = true): void {
     const { items } = this.model
+    // Views for every item (the map stays complete even for folded ones, so
+    // un-folding / /expand-all is instant; only the container prunes).
     for (let index = this.views.size; index < items.length; index++) {
       const item = items[index]
-      const view = createView(item)
-      this.views.set(item.id, view)
-      this.messages.addChild(view)
-    }
-    for (const item of items) {
-      const view = this.views.get(item.id)
-      if (view !== undefined) {
-        updateView(view, item, this.expandReasoning, this.expandTools)
-      }
+      this.views.set(item.id, createView(item))
     }
 
-    // Working loader between messages and the status bar.
+    // Working loader between messages and the status bar (before the fold
+    // reconcile so a rebuilt container includes it).
     if (this.model.working && this.workingLoader === undefined) {
       const loader = new Loader(this.tui, style.spinner, style.workingLabel, 'Working…')
       loader.start()
@@ -1383,6 +1750,41 @@ export class ChatScreen {
       this.workingLoader.stop()
       this.messages.removeChild(this.workingLoader)
       this.workingLoader = undefined
+    }
+
+    // Long-session fold: rebuild the visible child list only when the fold
+    // window moved (threshold crossed, expand toggled, or session switch).
+    // When unfolded, the container is append-only — just add views created
+    // above (the loader, if present, must stay AFTER all views).
+    const foldKey = foldWindow(items.length, this.expandedAll, this.FOLD_THRESHOLD)
+    if (foldKey.key !== this.lastFoldKey) {
+      this.lastFoldKey = foldKey.key
+      this.reconcileContainer(items, foldKey)
+    } else if (foldKey.key === 'none') {
+      const loaderOffset = this.workingLoader !== undefined ? 1 : 0
+      const firstMissing = this.messages.children.length - loaderOffset
+      if (firstMissing < items.length) {
+        if (this.workingLoader !== undefined) this.messages.removeChild(this.workingLoader)
+        for (let id = firstMissing; id < items.length; id++) {
+          const view = this.views.get(id)
+          if (view !== undefined) this.messages.addChild(view)
+        }
+        if (this.workingLoader !== undefined) this.messages.addChild(this.workingLoader)
+      }
+    }
+
+    const foldBoundary = foldKey.boundary
+    for (const item of items) {
+      if (item.id < foldBoundary) continue
+      const view = this.views.get(item.id)
+      if (view !== undefined) {
+        updateView(view, item, this.expandReasoning, this.expandTools, this.searchQuery)
+      }
+    }
+
+    // Browse-mode focus ring (accent border on the focused tool card).
+    for (const [id, view] of this.views) {
+      if (view instanceof ToolCardView) view.setFocused(id === this.focusedToolId)
     }
 
     // Session projections (todo list, token meter, permissions) are the
@@ -1435,6 +1837,7 @@ export class ChatScreen {
       model: effort !== undefined ? `${route.model}·${effort}` : route.model,
       sessionId: String(this.agent.session.id),
       cwd: basename(this.cwd),
+      git: this.gitState,
       tokens,
       todos,
       title: this.model.title,
@@ -1449,6 +1852,28 @@ export class ChatScreen {
     }
     this.statusBar.update(status)
     this.tui.requestRender()
+  }
+
+  /** Rebuild the transcript container for the current fold window: a fold
+   * notice (when folded), the visible views in order, then the loader. */
+  private reconcileContainer(items: readonly ChatItem[], window: FoldWindow): void {
+    this.messages.clear()
+    if (window.key.startsWith('folded:')) {
+      const folded = Number(window.key.slice('folded:'.length))
+      if (this.foldNotice === undefined) this.foldNotice = new Text('', 1, 0)
+      this.foldNotice.setText(
+        style.muted(
+          `… ${folded} earlier message${folded === 1 ? '' : 's'} folded — /expand-all shows all`,
+        ),
+      )
+      this.messages.addChild(this.foldNotice)
+    }
+    for (const item of items) {
+      if (item.id < window.boundary) continue
+      const view = this.views.get(item.id)
+      if (view !== undefined) this.messages.addChild(view)
+    }
+    if (this.workingLoader !== undefined) this.messages.addChild(this.workingLoader)
   }
 
   /**
