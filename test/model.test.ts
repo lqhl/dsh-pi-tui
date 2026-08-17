@@ -172,6 +172,167 @@ test('skips ask_user_question tool cards (provider renders them)', () => {
   assert.equal(model.items.length, 0)
 })
 
+test('exit_plan_mode previews the plan title instead of the raw plan JSON', () => {
+  const model = createModel()
+  applyEvent(
+    model,
+    event(
+      'tool/call',
+      {
+        turn: 1,
+        step: 1,
+        callId: 'p1',
+        name: 'exit_plan_mode',
+        arguments: JSON.stringify({ plan: '# Ship the widget\n\nA long body.' }),
+      },
+      1,
+    ),
+  )
+  assert.equal(model.items.length, 1)
+  assert.equal(model.items[0].tool?.argsPreview, 'Ship the widget')
+
+  // A plan with no heading falls back to a compact placeholder.
+  const noHeading = createModel()
+  applyEvent(
+    noHeading,
+    event(
+      'tool/call',
+      {
+        turn: 1,
+        step: 1,
+        callId: 'p2',
+        name: 'exit_plan_mode',
+        arguments: JSON.stringify({ plan: 'just some text' }),
+      },
+      1,
+    ),
+  )
+  assert.equal(noHeading.items[0].tool?.argsPreview, 'plan')
+
+  // Other tools keep the raw whitespace-collapsed JSON preview.
+  const other = createModel()
+  applyEvent(
+    other,
+    event(
+      'tool/call',
+      { turn: 1, step: 1, callId: 'b1', name: 'bash', arguments: '{"command":"ls"}' },
+      1,
+    ),
+  )
+  assert.equal(other.items[0].tool?.argsPreview, '{"command":"ls"}')
+})
+
+test('exit_plan_mode carries its full plan on the tool card', () => {
+  const model = createModel()
+  applyEvent(
+    model,
+    event(
+      'tool/call',
+      {
+        turn: 1,
+        step: 1,
+        callId: 'p1',
+        name: 'exit_plan_mode',
+        arguments: JSON.stringify({ plan: '# Ship the widget\n\nA long body.' }),
+      },
+      1,
+    ),
+  )
+  assert.equal(model.items[0].tool?.planText, '# Ship the widget\n\nA long body.')
+
+  // Other tools never carry a plan.
+  const other = createModel()
+  applyEvent(
+    other,
+    event('tool/call', { turn: 1, step: 1, callId: 'b1', name: 'bash', arguments: '{}' }, 1),
+  )
+  assert.equal(other.items[0].tool?.planText, undefined)
+})
+
+test('exit_plan_mode review decisions render as neutral, not errors', () => {
+  const model = createModel()
+  applyEvent(
+    model,
+    event(
+      'tool/call',
+      {
+        turn: 1,
+        step: 1,
+        callId: 'p1',
+        name: 'exit_plan_mode',
+        arguments: JSON.stringify({ plan: '# Ship the widget' }),
+      },
+      1,
+    ),
+  )
+  applyEvent(
+    model,
+    event(
+      'tool/result',
+      {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'tool',
+          source: { callId: 'p1' },
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'p1',
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: 'Error: The user chose to keep planning; revise the plan and present it again.',
+                },
+              ],
+            },
+          ],
+        },
+      },
+      2,
+    ),
+  )
+  const card = model.items[0].tool
+  assert.equal(card?.status, 'rejected')
+  assert.equal(card?.resultPreview, 'Plan not approved — still in plan mode')
+  assert.equal(card?.errorText, undefined)
+})
+
+test('plain tool errors (non-HarnessError) render as errors', () => {
+  const model = createModel()
+  applyEvent(
+    model,
+    event('tool/call', { turn: 1, step: 1, callId: 'b1', name: 'bash', arguments: '{}' }, 1),
+  )
+  applyEvent(
+    model,
+    event(
+      'tool/result',
+      {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'tool',
+          source: { callId: 'b1' },
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'b1',
+              isError: true,
+              content: [{ type: 'text', text: 'Error: command not found' }],
+            },
+          ],
+        },
+      },
+      2,
+    ),
+  )
+  const card = model.items[0].tool
+  assert.equal(card?.status, 'error')
+  assert.equal(card?.errorText, 'command not found')
+})
+
 test('turn boundaries drive the working flag and fold reasoning', () => {
   const model = createModel()
   assert.equal(model.working, false)

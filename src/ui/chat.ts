@@ -32,12 +32,14 @@ import {
   Container,
   Editor,
   Loader,
-  TuiMainScreen,
+  ScrollView,
+  TuiAltScreen,
+  VStack,
   isKeyRelease,
   matchesKey,
   type AutocompleteProvider,
   type SlashCommand,
-  type TUI,
+  type ViewportTUI,
 } from '@earendil-works/pi-tui'
 import { applyEvent, createModel, pushNotice, textOf, type ChatModel } from '../core/model.js'
 import { seedModelSelection } from '../core/selection.js'
@@ -71,7 +73,7 @@ import { buildBanner } from './banner.js'
 
 export interface ChatScreenOptions {
   ctx: Context
-  tui: TUI
+  tui: ViewportTUI
   agent: Agent
   config: {
     provider?: string
@@ -99,7 +101,7 @@ interface LlmRuntime extends LlmRuntimeLike {
 
 export class ChatScreen {
   private readonly ctx: Context
-  private readonly tui: TUI
+  private readonly tui: ViewportTUI
   private agent: Agent
   private readonly config: ChatScreenOptions['config']
   private readonly commands: CommandRuntime | undefined
@@ -133,7 +135,6 @@ export class ChatScreen {
     this.seedSelection()
     this.disposeSelection = installModelSelection(this.agent.ctx, this.selection)
 
-    this.tui.addChild(this.messages)
     this.editor = new Editor(this.tui, editorTheme, { paddingX: 1 })
     this.editor.onSubmit = (text) => {
       this.submit(text)
@@ -145,10 +146,31 @@ export class ChatScreen {
     // pi-tui's combined provider: slash commands (official + local UI
     // commands) plus file-path completion anchored at the session cwd.
     this.rebuildAutocomplete()
-    // Layout: messages, editor, then the status line pinned at the BOTTOM
-    // (pi/Claude Code convention).
-    this.tui.addChild(this.editor)
-    this.tui.addChild(this.statusBar)
+    // Layout: the transcript scrolls in an application-owned viewport, and
+    // the editor + status line are pinned at the BOTTOM (pi/Claude Code
+    // convention). The alternate-screen renderer diffs rows in place, so
+    // content shrink (e.g. reasoning collapsing at seal) no longer triggers
+    // the whole-screen + scrollback clear that TuiMainScreen used.
+    this.tui.setLayoutRoot(
+      new VStack([
+        {
+          component: new ScrollView(this.messages, {
+            follow: 'end',
+            primary: true,
+            overscroll: 'chain',
+          }),
+          basis: 0,
+          grow: 1,
+          minSize: 1,
+        },
+        {
+          component: new VStack([this.editor, this.statusBar]),
+          basis: 'auto',
+          shrink: 1,
+          minSize: 1,
+        },
+      ]),
+    )
     this.tui.setFocus(this.editor)
 
     this.tui.addInputListener((data: string) => {
@@ -1546,8 +1568,8 @@ export class ChatScreen {
   }
 }
 
-export function createTui(terminal: import('@earendil-works/pi-tui').Terminal): TUI {
-  return new TuiMainScreen(terminal)
+export function createTui(terminal: import('@earendil-works/pi-tui').Terminal): ViewportTUI {
+  return new TuiAltScreen(terminal)
 }
 
 /** Minimal ShellProcess surface the `!` command consumes. */

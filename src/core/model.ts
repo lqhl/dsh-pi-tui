@@ -9,7 +9,7 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
-export type ToolCardStatus = 'running' | 'ok' | 'error'
+export type ToolCardStatus = 'running' | 'ok' | 'error' | 'rejected'
 
 export interface ToolCardState {
   callId: string
@@ -19,6 +19,8 @@ export interface ToolCardState {
   resultPreview?: string
   /** Untruncated result, rendered when the user expands tool output. */
   resultFull?: string
+  /** Full plan markdown carried by an exit_plan_mode call, rendered as the card body. */
+  planText?: string
   errorText?: string
   /** Result-time file diffs from tool meta (dsh-tool-fs), for /Ctrl+O view. */
   diffs?: FileDiff[]
@@ -103,6 +105,66 @@ function preview(text: string, limit: number): string {
   return single.length > limit ? `${single.slice(0, limit)}…` : single
 }
 
+/** First `# heading` of a plan, or undefined when it has none. */
+function planHeading(plan: string): string | undefined {
+  for (const line of plan.split('\n')) {
+    const match = /^#{1,6}\s+(.+?)\s*$/.exec(line)
+    if (match) return match[1]
+  }
+  return undefined
+}
+
+/**
+ * Compact tool-args preview. Most tools keep the whitespace-collapsed raw
+ * JSON, but exit_plan_mode carries the whole plan in its arguments — already
+ * shown in the plan-review overlay — so it previews as the plan's title.
+ */
+function toolArgsPreview(name: string, argumentsJson: string): string {
+  if (name === 'exit_plan_mode') {
+    try {
+      const parsed = JSON.parse(argumentsJson) as { plan?: unknown }
+      if (typeof parsed.plan === 'string' && parsed.plan.trim() !== '') {
+        return planHeading(parsed.plan) ?? 'plan'
+      }
+    } catch {
+      // Malformed JSON: fall back to the raw preview.
+    }
+  }
+  return preview(argumentsJson, ARGS_PREVIEW_LIMIT)
+}
+
+/** Full plan text from an exit_plan_mode call, or undefined for other tools. */
+function toolPlanText(name: string, argumentsJson: string): string | undefined {
+  if (name !== 'exit_plan_mode') return undefined
+  try {
+    const parsed = JSON.parse(argumentsJson) as { plan?: unknown }
+    return typeof parsed.plan === 'string' && parsed.plan.trim() !== '' ? parsed.plan : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Strip the "Error: " prefix the tool runtime puts on thrown-error text. */
+function stripErrorPrefix(text: string): string {
+  return text.replace(/^Error:\s*/, '')
+}
+
+/**
+ * exit_plan_mode failures that are actually human decisions, not errors.
+ * Mirrors dsh-plan-mode's review-outcome messages: "keep planning" and the
+ * dismissed-to-speak takeovers both leave the plan unapproved.
+ */
+function exitPlanNotApproved(text: string): string | undefined {
+  const message = stripErrorPrefix(text)
+  if (message.startsWith('The user chose to keep planning')) {
+    return 'Plan not approved — still in plan mode'
+  }
+  if (message.startsWith('The user dismissed the plan review to speak instead')) {
+    return 'Dismissed — chat instead; still in plan mode'
+  }
+  return undefined
+}
+
 /**
  * Fold one session event into the model. Stateful in place; returns the
  * model for chaining.
@@ -180,6 +242,7 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       // ask_user_question renders through the userQuestions provider (M2),
       // not as a tool card — the model parks waiting for a human answer.
       if (event.data.name === 'ask_user_question') break
+      const planText = toolPlanText(event.data.name, event.data.arguments)
       push({
         kind: 'tool',
         text: '',
@@ -188,8 +251,9 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
         tool: {
           callId: event.data.callId,
           name: event.data.name,
-          argsPreview: preview(event.data.arguments, ARGS_PREVIEW_LIMIT),
+          argsPreview: toolArgsPreview(event.data.name, event.data.arguments),
           status: 'running',
+          ...(planText !== undefined ? { planText } : {}),
         },
       })
       break
@@ -199,37 +263,53 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       const card = model.items.find((item) => item.kind === 'tool' && item.tool?.callId === callId)
       if (card === undefined || card.tool === undefined) break
       card.streaming = false
-      const failure = event.data.error
-      if (failure !== undefined) {
-        card.tool.status = 'error'
-        card.tool.errorText = `${failure.name}: ${failure.code}`
-      } else {
-        card.tool.status = 'ok'
-        const block = event.data.message.content[0]
-        const result =
-          block !== undefined && block.type === 'tool-result' ? textOf(block.content) : ''
-        if (result) {
-          card.tool.resultPreview = preview(result, RESULT_PREVIEW_LIMIT)
-          card.tool.resultFull = result
+
+      const block = event.data.message.content[0]
+      const result =
+        block !== undefined && block.type === 'tool-result' ? textOf(block.content) : ''
+      // A plain `Error` thrown by a tool body carries no `event.data.error`
+      // (only HarnessErrors do); its failure is flagged on the result block.
+      const failed =
+        event.data.error !== undefined ||
+        (block !== undefined && block.type === 'tool-result' && block.isError === true)
+
+      if (failed) {
+        const notApproved =
+          card.tool.name === 'exit_plan_mode' ? exitPlanNotApproved(result) : undefined
+        if (notApproved !== undefined) {
+          card.tool.status = 'rejected'
+          card.tool.resultPreview = notApproved
+        } else {
+          card.tool.status = 'error'
+          const failure = event.data.error
+          card.tool.errorText =
+            failure !== undefined ? `${failure.name}: ${failure.code}` : stripErrorPrefix(result)
         }
-        const imageRefs = event.data.message.content
-          .flatMap((block) => (block.type === 'tool-result' ? block.content : []))
-          .filter((block) => block.type === 'image')
-          .map((block) => {
-            const attachment = (block as unknown as { attachment?: unknown }).attachment as
-              ImageAttachmentRef | undefined
-            return attachment
-          })
-          .filter(
-            (ref): ref is ImageAttachmentRef =>
-              ref !== undefined && typeof ref.attachmentId === 'string',
-          )
-        if (imageRefs.length > 0) card.tool.imageRefs = imageRefs
-        const meta = event.data.meta as { diffs?: unknown } | undefined
-        if (meta !== undefined && Array.isArray(meta.diffs)) {
-          const diffs = meta.diffs.filter(isFileDiff)
-          if (diffs.length > 0) card.tool.diffs = diffs
-        }
+        break
+      }
+
+      card.tool.status = 'ok'
+      if (result) {
+        card.tool.resultPreview = preview(result, RESULT_PREVIEW_LIMIT)
+        card.tool.resultFull = result
+      }
+      const imageRefs = event.data.message.content
+        .flatMap((block) => (block.type === 'tool-result' ? block.content : []))
+        .filter((block) => block.type === 'image')
+        .map((block) => {
+          const attachment = (block as unknown as { attachment?: unknown }).attachment as
+            ImageAttachmentRef | undefined
+          return attachment
+        })
+        .filter(
+          (ref): ref is ImageAttachmentRef =>
+            ref !== undefined && typeof ref.attachmentId === 'string',
+        )
+      if (imageRefs.length > 0) card.tool.imageRefs = imageRefs
+      const meta = event.data.meta as { diffs?: unknown } | undefined
+      if (meta !== undefined && Array.isArray(meta.diffs)) {
+        const diffs = meta.diffs.filter(isFileDiff)
+        if (diffs.length > 0) card.tool.diffs = diffs
       }
       break
     }

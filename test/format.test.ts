@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { visibleWidth } from '@earendil-works/pi-tui'
-import { contextPctOf, renderContextBar, sandboxShort, shortTokens } from '../src/core/format.js'
+import {
+  contextPctOf,
+  ellipsize,
+  renderContextBar,
+  sandboxShort,
+  shortTokens,
+} from '../src/core/format.js'
 
 test('sandboxShort maps modes to compact labels', () => {
   assert.equal(sandboxShort('workspace-write'), 'ws-write')
@@ -9,6 +15,15 @@ test('sandboxShort maps modes to compact labels', () => {
   assert.equal(sandboxShort('danger-full-access'), 'danger')
   assert.equal(sandboxShort('custom-mode'), 'custom-mode')
   assert.equal(sandboxShort(undefined), undefined)
+})
+
+test('ellipsize truncates overflowing text with a single ellipsis', () => {
+  assert.equal(ellipsize('hello', 10), 'hello')
+  assert.equal(ellipsize('hello', 5), 'hello')
+  assert.equal(ellipsize('hello', 4), 'hel…')
+  assert.equal(ellipsize('hello', 1), '…')
+  assert.equal(ellipsize('hello', 0), '')
+  assert.equal(ellipsize('hello', -1), '')
 })
 
 test('shortTokens abbreviates human-readably', () => {

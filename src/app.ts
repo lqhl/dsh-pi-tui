@@ -7,10 +7,11 @@
  * disposing the whole tree (bounded fallback, cc-tui semantics).
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { ProcessTerminal, TuiMainScreen, type TUI } from '@earendil-works/pi-tui'
+import { TuiAltScreen, type ViewportTUI } from '@earendil-works/pi-tui'
 import { parseArgs, USAGE } from './args.js'
 import { listPresets, listSessions, resolveAgent, type ResolvedAgent } from './core/session.js'
 import { AgentDefaultModelService } from './core/services.js'
+import { ClipboardTerminal } from './ui/clipboard-terminal.js'
 import { pickSession } from './ui/session-picker.js'
 import { pickFromListWithSearch } from './ui/overlays.js'
 import { confirmApproval, askQuestions } from './ui/overlays.js'
@@ -59,8 +60,8 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
     throw new Error('dsh-pi-tui needs an interactive terminal (stdout is not a TTY)')
   }
 
-  const terminal = new ProcessTerminal()
-  const tui: TUI = new TuiMainScreen(terminal)
+  const terminal = new ClipboardTerminal()
+  const tui: ViewportTUI = new TuiAltScreen(terminal)
   tui.start()
 
   const agentOptions = { provider: effectiveProvider, model: effectiveModel }

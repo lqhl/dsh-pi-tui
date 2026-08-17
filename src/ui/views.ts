@@ -23,9 +23,9 @@ import { renderContextBar, sandboxShort, shortTokens } from '../core/format.js'
  * Collapsed reasoning label; expanded renders the markdown body. While the
  * text is still streaming it renders as plain wrapped text instead of
  * markdown: partial markdown re-parses on every delta and structures like
- * tables re-flow their columns, which makes TuiMainScreen fall back to a
- * full clear-and-redraw whenever the changed lines sit above the viewport —
- * the visible "screen flicker" during long transcripts.
+ * tables re-flow their columns, churning the transcript and re-rendering
+ * the whole body O(n) per delta. Plain wrapped text grows monotonically, so
+ * only the tail ever changes.
  */
 export class ReasoningView extends Container {
   private body: Markdown
@@ -161,6 +161,8 @@ export class ToolCardView implements Component {
    * extra full redraws (flicker). Reuse them; only width changes rebuild. */
   private imageViews: Image[] = []
   private imageViewsWidth = -1
+  /** Cached markdown view for an exit_plan_mode card's full plan body. */
+  private planMarkdown: Markdown | undefined
 
   constructor(item: ChatItem) {
     this.item = item
@@ -190,6 +192,9 @@ export class ToolCardView implements Component {
       if (tool.status === 'error') {
         return `${style.toolError('✗')} ${style.toolName(tool.name)} ${style.toolError(tool.errorText ?? 'error')}`
       }
+      if (tool.status === 'rejected') {
+        return `${style.muted('↩')} ${style.toolName(tool.name)} ${style.toolArgs(tool.argsPreview)} — ${style.muted(tool.resultPreview ?? 'not approved')}`
+      }
       return `${style.toolOk('✓')} ${style.toolName(tool.name)} ${style.toolArgs(tool.argsPreview)}`
     })()
     // Display-width-aware truncation: CJK glyphs occupy two columns, so
@@ -201,7 +206,19 @@ export class ToolCardView implements Component {
       return `${truncateToWidth(line, Math.max(0, inner - 1))}…`
     }
     lines.push(`${border} ${truncate(statusLine)}`)
-    if (tool.status !== 'running') {
+    // exit_plan_mode carries the full plan in its arguments; render it as the
+    // card body so the scrollable transcript (not the overlay) holds the plan.
+    if (tool.planText !== undefined && tool.planText !== '') {
+      if (this.planMarkdown === undefined) {
+        this.planMarkdown = new Markdown(tool.planText, 0, 0, markdownTheme)
+      }
+      for (const line of this.planMarkdown.render(inner)) {
+        lines.push(`${border} ${truncate(line)}`)
+      }
+    }
+    // Only successful results get a body; running/error/rejected cards carry
+    // their status in the status line alone.
+    if (tool.status === 'ok') {
       // Expanded view with result-time diffs (write/edit tools) renders a
       // colored unified diff instead of the raw result text.
       if (this.expand && tool.diffs !== undefined && tool.diffs.length > 0) {
@@ -289,6 +306,7 @@ export class ToolCardView implements Component {
 
   invalidate(): void {
     this.lastRender = undefined
+    this.planMarkdown?.invalidate()
   }
 }
 

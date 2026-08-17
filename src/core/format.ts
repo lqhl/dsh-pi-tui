@@ -16,6 +16,17 @@ export function sandboxShort(mode: string | undefined): string | undefined {
   return SANDBOX_SHORT[mode] ?? mode
 }
 
+/**
+ * Truncate text to `maxWidth` characters, appending a single-character
+ * ellipsis when it overflows. `maxWidth <= 0` yields an empty string.
+ */
+export function ellipsize(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return ''
+  if (text.length <= maxWidth) return text
+  if (maxWidth === 1) return '…'
+  return `${text.slice(0, maxWidth - 1)}…`
+}
+
 /** Human-readable token count (12345 → '12k', 1234567 → '1.2M'). */
 export function shortTokens(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`

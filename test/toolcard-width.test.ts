@@ -108,6 +108,37 @@ test('diff rendering stays within width (CJK + ANSI)', async () => {
   tui.stop()
 })
 
+test('exit_plan_mode card renders the full plan within width', async () => {
+  const terminal = new MockTerminal()
+  terminal.width = 60
+  const tui = new TuiMainScreen(terminal)
+  const item: ChatItem = {
+    id: 0,
+    kind: 'tool',
+    text: '',
+    streaming: false,
+    tool: {
+      callId: 'p1',
+      name: 'exit_plan_mode',
+      argsPreview: 'Ship the widget',
+      status: 'running',
+      planText: `# Ship the widget\n\nA long plan body ${'x'.repeat(120)}`,
+    },
+  }
+  const view = new ToolCardView(item)
+  tui.addChild(view)
+  tui.start()
+  tui.requestRender()
+  await tick()
+  const output = stripAnsi(terminal.output)
+  assert.ok(output.includes('Ship the widget'), 'plan heading should render')
+  for (const line of output.split('\n')) {
+    if (line.trim() === '') continue
+    assert.ok(visibleWidth(line) <= terminal.width, `line exceeds width ${terminal.width}: ${line}`)
+  }
+  tui.stop()
+})
+
 test('image capability fallback renders a text note, no crash', async () => {
   const terminal = new MockTerminal()
   terminal.width = 60

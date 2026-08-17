@@ -9,16 +9,16 @@
  * exit path (selection, cancel, signal abort).
  */
 import type { ApprovalRequest, ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
-import type {
-  AskUserQuestionAnswer,
-  AskUserQuestionAnswerItem,
-  AskUserQuestionItem,
-  AskUserQuestionRequest,
+import {
+  UserQuestionError,
+  type AskUserQuestionAnswer,
+  type AskUserQuestionAnswerItem,
+  type AskUserQuestionItem,
+  type AskUserQuestionRequest,
 } from '@deepseek-ai/dsh-user-questions'
 import {
   Container,
   Input,
-  Markdown,
   SelectList,
   Text,
   fuzzyFilter,
@@ -26,7 +26,7 @@ import {
   type TUI,
 } from '@earendil-works/pi-tui'
 import { RG_DISPLAY_CAP } from '../core/files.js'
-import { markdownTheme, selectListTheme, style } from './theme.js'
+import { selectListTheme, style } from './theme.js'
 
 /** Content root forwarding input to a SelectList child. */
 class ListPanel extends Container {
@@ -340,7 +340,12 @@ async function step(
     .filter((line): line is string => line !== undefined)
     .join('\n')
 
-  const item: AskUserQuestionAnswerItem | undefined = await new Promise((resolve) => {
+  // A plan-review question closes differently from a generic one: dismissing
+  // it means "the user wants to talk instead", which dsh-plan-mode reads from
+  // the ASK_CANCELLED rejection — not a skip that yields an empty answer.
+  const planReview = question.intent?.kind === 'plan-review'
+
+  const item: AskUserQuestionAnswerItem | undefined = await new Promise((resolve, reject) => {
     let settled = false
     const finish = (value: AskUserQuestionAnswerItem | undefined): void => {
       if (settled) return
@@ -348,12 +353,26 @@ async function step(
       handle.hide()
       resolve(value)
     }
+    const dismiss = (): void => {
+      if (settled) return
+      settled = true
+      handle.hide()
+      reject(
+        new UserQuestionError('the user dismissed the review to speak instead', 'ASK_CANCELLED'),
+      )
+    }
     const onAbort = (): void => finish(undefined)
     request.signal?.addEventListener('abort', onAbort, { once: true })
 
     let handle: ReturnType<TUI['showOverlay']>
     if (question.options !== undefined && question.options.length > 0) {
-      handle = optionsStep(tui, question, body, finish)
+      handle = optionsStep(
+        tui,
+        question,
+        body,
+        finish,
+        planReview ? dismiss : () => finish(undefined),
+      )
     } else {
       handle = textStep(tui, question, body, finish)
     }
@@ -370,6 +389,7 @@ function optionsStep(
   question: AskUserQuestionItem,
   body: string,
   finish: (value: AskUserQuestionAnswerItem | undefined) => void,
+  cancel: () => void,
 ): ReturnType<TUI['showOverlay']> {
   const options = question.options ?? []
   const multi = question.multiSelect === true
@@ -398,15 +418,19 @@ function optionsStep(
     Math.min(12, Math.max(2, ordered.length + 1)),
     selectListTheme,
   )
-  const panel =
-    approveLabel !== undefined
-      ? new PlanReviewPanel(question.detail ?? '', list)
-      : new ListPanel(
-          question.question,
-          multi ? `${body}\n(multi-select: pick items, then Done)` : body,
-          list,
-        )
-  const handle = tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
+  const planReview = approveLabel !== undefined
+  const panel = planReview
+    ? new PlanReviewPanel(question, list)
+    : new ListPanel(
+        question.question,
+        multi ? `${body}\n(multi-select: pick items, then Done)` : body,
+        list,
+      )
+  // Plan review pins a small decision bar to the bottom so the transcript
+  // (which holds the full plan) stays visible and scrollable above it.
+  const handle = planReview
+    ? tui.showOverlay(panel, { width: '70%', anchor: 'bottom-center' })
+    : tui.showOverlay(panel, { width: '70%', maxHeight: '70%' })
 
   list.onSelect = (picked) => {
     if (picked.value === '__done__') {
@@ -429,30 +453,45 @@ function optionsStep(
     panel.replaceList(rebuilt)
     tui.requestRender()
   }
-  list.onCancel = () => finish(undefined)
+  list.onCancel = cancel
   return handle
 }
 
 /**
- * Plan-review overlay: the plan renders as markdown above the decision list,
- * with the approve option first (AskUserQuestionIntent['plan-review']).
+ * Plan-review decision bar: title + question + the approve/decline list, plus
+ * a hint. The full plan renders in the transcript's exit_plan_mode tool card
+ * (scrollable via the main viewport), so this overlay stays small and is
+ * anchored to the bottom of the screen.
  */
 class PlanReviewPanel extends Container {
-  constructor(planMarkdown: string, list: SelectList) {
+  private list: SelectList
+  private readonly listChildIndex: number
+
+  constructor(question: AskUserQuestionItem, list: SelectList) {
     super()
-    this.addChild(new Text(style.accent('Plan review — approve to proceed'), 1, 0))
-    this.addChild(new Markdown(planMarkdown, 1, 0, markdownTheme))
-    this.addChild(list)
+    this.list = list
+    const title =
+      question.header !== undefined && question.header !== '' ? question.header : 'Plan review'
+    this.addChild(new Text(style.accent(title), 1, 0))
+    this.addChild(new Text(question.question, 1, 0))
+    this.addChild(this.list)
+    this.listChildIndex = this.children.length - 1
+    this.addChild(
+      new Text(
+        style.statusBar('PgUp/PgDn scroll the plan · ↑↓ choose · Enter approve · Esc chat'),
+        1,
+        0,
+      ),
+    )
   }
 
   handleInput(data: string): void {
-    // Forward to the (single) SelectList child.
-    const list = this.children.at(-1)
-    if (list instanceof SelectList) list.handleInput(data)
+    this.list.handleInput(data)
   }
 
   replaceList(list: SelectList): void {
-    this.children[this.children.length - 1] = list
+    this.list = list
+    this.children[this.listChildIndex] = list
   }
 }
 
