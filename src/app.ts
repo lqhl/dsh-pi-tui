@@ -12,6 +12,7 @@ import { parseArgs, USAGE } from './args.js'
 import {
   listPresets,
   listSessions,
+  reconcileWorkspaceAttachments,
   resolveAgent,
   sessionTitles,
   type ResolvedAgent,
@@ -164,6 +165,12 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
       screen.handleEvent(event)
     }
   })
+
+  // Heal workspace grouping after the harness's cross-process index
+  // staleness: the web host's startup-only cwd index hides and eventually
+  // prunes TUI-created sessions from their workspace. Re-attach persisted
+  // sessions to their cwd workspace on boot (additive, best effort).
+  void reconcileWorkspaceAttachments(ctx)
 
   // If the surrounding tree goes down (reload, teardown), take the TUI
   // with it: stop the renderer and drain queued stdin so kitty key-release

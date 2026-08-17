@@ -1,8 +1,17 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { forkSession, resolveAgent, resumeCommand, type SessionMeta } from '../src/core/session.js'
+import {
+  forkSession,
+  reconcileWorkspaceAttachments,
+  resolveAgent,
+  resumeCommand,
+  type SessionMeta,
+} from '../src/core/session.js'
 
 const OPTIONS: AgentOptions = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
 const META: SessionMeta = { cwd: '/tmp/pi-tui-test' }
@@ -27,7 +36,9 @@ function makeCtx(
 ): Context {
   const ctx = {
     agents,
-    logger: { warn },
+    // `info` falls back to the warn sink so success-path logging does not
+    // blow up the mock (reconcileWorkspaceAttachments logs on success).
+    logger: { warn, info: warn },
     get: (name: string) => services[name],
     on,
   }
@@ -303,4 +314,88 @@ test('defers workspace attach for a forked session until its first event', async
 
 test('formats a copy-pasteable resume command', () => {
   assert.equal(resumeCommand('abc-123'), 'dsh --profile pi-tui --resume abc-123')
+})
+
+test('reconcileWorkspaceAttachments re-attaches missing sessions', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-tui-reconcile-'))
+  try {
+    const attached: string[] = []
+    const headers = [
+      { id: 'aaa-1', cwd: dir, createdAt: 1 },
+      { id: 'bbb-2', cwd: dir, createdAt: 2 },
+      { id: 'ccc-3', cwd: dir, createdAt: 3 },
+      { id: 'ddd-4', cwd: '/tmp/pi-tui-other', createdAt: 4 }, // no workspace
+      { id: 'eee-5', createdAt: 5 }, // no cwd — skipped
+    ]
+    // resolveByPath canonicalizes; report the canonical path like the real
+    // registry does.
+    const canonical = await realpath(dir)
+    const workspace = {
+      path: canonical,
+      sessionIds: ['bbb-2'], // aaa-1 and ccc-3 were pruned
+      attachSession: async (id: unknown) => {
+        attached.push(String(id))
+      },
+    }
+    const ctx = makeCtx(
+      {
+        get: () => undefined,
+        resume: async () => undefined as never,
+        create: async () => undefined as never,
+      },
+      {
+        workspaceRegistry: {
+          resolveByPath: async (path: string) => (path === canonical ? workspace : undefined),
+          create: async () => {
+            throw new Error('reconcile must not create workspaces')
+          },
+        },
+        sessionPersistence: { list: async () => headers },
+      },
+    )
+    const repaired = await reconcileWorkspaceAttachments(ctx)
+    assert.equal(repaired, 2)
+    assert.deepEqual(attached, ['aaa-1', 'ccc-3'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('reconcileWorkspaceAttachments skips unresolvable cwds and unknown workspaces', async () => {
+  const attached: string[] = []
+  const headers = [
+    { id: 'fff-1', cwd: '/no/such/dir/anywhere', createdAt: 1 }, // does not resolve
+    { id: 'ggg-2', cwd: '/tmp/unowned-workspace', createdAt: 2 }, // no workspace
+  ]
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => undefined as never,
+      create: async () => undefined as never,
+    },
+    {
+      workspaceRegistry: {
+        resolveByPath: async () => undefined,
+        create: async () => {
+          throw new Error('reconcile must not create workspaces')
+        },
+      },
+      sessionPersistence: { list: async () => headers },
+    },
+  )
+  const repaired = await reconcileWorkspaceAttachments(ctx)
+  assert.equal(repaired, 0)
+  assert.equal(attached.length, 0)
+})
+
+test('reconcileWorkspaceAttachments is a no-op without the services', async () => {
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => undefined as never,
+      create: async () => undefined as never,
+    },
+    {},
+  )
+  assert.equal(await reconcileWorkspaceAttachments(ctx), 0)
 })

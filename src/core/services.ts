@@ -25,6 +25,15 @@ export interface AgentDefaultModelService {
 
 /** Minimal dsh-workspace entity surface (the value `resolveByPath`/`create` return). */
 export interface WorkspaceService {
+  /** Canonical workspace path (registry-stored). */
+  readonly path: string
+  /**
+   * Sessions visible in this workspace: raw `sessionIds` filtered by the
+   * registry's per-process canonical-cwd index. The web host's index is a
+   * startup snapshot, so TUI-created sessions can be hidden here even when
+   * attached (see `reconcileWorkspaceAttachments` in core/session.ts).
+   */
+  readonly sessionIds: readonly string[]
   attachSession(sessionId: SessionId): Promise<void>
 }
 

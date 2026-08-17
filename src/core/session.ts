@@ -4,6 +4,7 @@
  * a fresh session and stays loud in the log.
  */
 import { randomUUID } from 'node:crypto'
+import { realpath } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
@@ -109,6 +110,65 @@ export function attachWorkspaceOnFirstEvent(
     off()
     void attachToWorkspace(ctx, sessionId, cwd)
   })
+}
+
+/**
+ * Heal workspace grouping after the harness's cross-process index staleness.
+ *
+ * dsh-workspace builds its session→canonical-cwd index ONCE per process and
+ * filters/prunes workspace membership against it. A web host that started
+ * before the TUI created a session therefore:
+ *   1. hides that session from the web sidebar (it lands in "Ungrouped")
+ *      even though `attachWorkspaceOnFirstEvent` wrote it to the workspace's
+ *      raw sessionIds, and
+ *   2. DURABLY prunes it from the raw list on its next workspace write
+ *      (rename/archive/attach), permanently orphaning it.
+ *
+ * Run at TUI boot: for every persisted session whose canonical cwd resolves
+ * to an existing workspace but is missing from it, re-attach it. Additive
+ * only — no workspaces are created, no entries are pruned — so it can only
+ * repair, never destroy. The web host's own VIEW still needs a restart to
+ * rebuild its index; this heals the durable data loss that would otherwise
+ * be unrecoverable.
+ */
+export async function reconcileWorkspaceAttachments(ctx: Context): Promise<number> {
+  const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+  const persistence = ctx.get('sessionPersistence') as
+    { list(signal?: AbortSignal): Promise<readonly SessionHeader[]> } | undefined
+  if (registry === undefined || persistence === undefined) return 0
+  try {
+    const headers = await persistence.list()
+    let repaired = 0
+    for (const header of headers) {
+      if (header.cwd === undefined || header.cwd === '') continue
+      let canonical: string
+      try {
+        canonical = await realpath(header.cwd)
+      } catch {
+        continue // unresolvable cwd — no workspace can own it
+      }
+      // resolveByPath canonicalizes internally and returns the workspace
+      // whose stored path equals this session's cwd, or undefined.
+      const workspace = await registry.resolveByPath(canonical)
+      if (workspace === undefined) continue
+      // The entity's filtered view is accurate in THIS process (fresh index),
+      // so a miss means the raw list lost the session — re-attach it.
+      if (workspace.sessionIds.includes(String(header.id))) continue
+      await workspace.attachSession(header.id)
+      repaired += 1
+    }
+    if (repaired > 0) {
+      ctx.logger.info(`pi-tui: re-attached ${repaired} session(s) to their cwd workspace`)
+    }
+    return repaired
+  } catch (error) {
+    ctx.logger.warn(
+      `pi-tui: workspace reconciliation failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+    return 0
+  }
 }
 
 /** The preset a persisted session runs (last selection event, else header). */
