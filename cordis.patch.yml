@@ -30,3 +30,31 @@
       # the harness's agent-default-model selection (settings.yaml) unless
       # this row explicitly overrides them. `--resume` reaches the app
       # through ctx.cmdlineArgs.
+
+# ── workspace grouping rows (not in dsh-base) ───────────────────────────────
+#
+# `dsh-workspace` (ctx.workspaceRegistry) is what groups sessions into
+# workspaces by cwd, and it is a web-only row — the web bundle adds it plus
+# its storage chain, so a plain dsh-base profile like pi-tui has no
+# workspaceRegistry at all. The TUI creates sessions in-process through
+# ctx.agents.create (bypassing the web host's attachSession), so it loads the
+# same workspace service here to attach its sessions by cwd. Storage roots
+# mirror the web rows exactly, so both profiles read and write the same
+# workspace records under ~/.dsh.
+
+- insert:
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+
+    - id: storage-json
+      name: '@deepseek-ai/dsh-storage-json'
+      config:
+        root: !!js dshHomePath('storages')
+
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: json
+
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'

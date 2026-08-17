@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { resolveAgent, type SessionMeta } from '../src/core/session.js'
+import { forkSession, resolveAgent, type SessionMeta } from '../src/core/session.js'
 
 const OPTIONS: AgentOptions = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
 const META: SessionMeta = { cwd: '/tmp/pi-tui-test' }
@@ -114,4 +114,143 @@ test('throws a loud error when create fails', async () => {
     resolveAgent(ctx, undefined, OPTIONS, META),
     /failed to create agent \(provider=deepseek-official\): no factory/,
   )
+})
+
+test('attaches a fresh session to the workspace at its cwd', async () => {
+  const created = fakeHandle('created-ws')
+  let createOpts: { sessionId: unknown } | undefined
+  const attached: unknown[] = []
+  const workspace = {
+    attachSession: async (id: unknown) => {
+      attached.push(id)
+    },
+  }
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => {
+        throw new Error('unused')
+      },
+      create: async (opts) => {
+        createOpts = opts as typeof createOpts
+        return created
+      },
+    },
+    {
+      workspaceRegistry: {
+        resolveByPath: async () => workspace,
+        create: async () => {
+          throw new Error('create should not run when resolveByPath matches')
+        },
+      },
+    },
+  )
+  const resolved = await resolveAgent(ctx, undefined, OPTIONS, META)
+  assert.equal(resolved.agent, created.agent)
+  assert.equal(attached.length, 1)
+  assert.equal(attached[0], createOpts?.sessionId)
+})
+
+test('creates the workspace when the cwd is not yet registered', async () => {
+  const created = fakeHandle('created-ws2')
+  let createOpts: { sessionId: unknown } | undefined
+  const attached: unknown[] = []
+  let createdPath: string | undefined
+  const workspace = {
+    attachSession: async (id: unknown) => {
+      attached.push(id)
+    },
+  }
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => {
+        throw new Error('unused')
+      },
+      create: async (opts) => {
+        createOpts = opts as typeof createOpts
+        return created
+      },
+    },
+    {
+      workspaceRegistry: {
+        resolveByPath: async () => undefined,
+        create: async (path: string) => {
+          createdPath = path
+          return workspace
+        },
+      },
+    },
+  )
+  const resolved = await resolveAgent(ctx, undefined, OPTIONS, META)
+  assert.equal(resolved.agent, created.agent)
+  assert.equal(createdPath, META.cwd)
+  assert.equal(attached.length, 1)
+  assert.equal(attached[0], createOpts?.sessionId)
+})
+
+test('warns but still resolves when the workspace attach fails', async () => {
+  const created = fakeHandle('created-ws3')
+  const warns: string[] = []
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => {
+        throw new Error('unused')
+      },
+      create: async () => created,
+    },
+    {
+      workspaceRegistry: {
+        resolveByPath: async () => {
+          throw new Error('no such directory')
+        },
+        create: async () => {
+          throw new Error('unused')
+        },
+      },
+    },
+    (msg) => warns.push(msg),
+  )
+  const resolved = await resolveAgent(ctx, undefined, OPTIONS, META)
+  assert.equal(resolved.agent, created.agent)
+  assert.equal(warns.length, 1)
+  assert.ok(warns[0].includes('workspace attach for'))
+})
+
+test('attaches a forked session to the workspace at its cwd', async () => {
+  const created = fakeHandle('forked-ws')
+  let createOpts: { sessionId: unknown } | undefined
+  const attached: unknown[] = []
+  const workspace = {
+    attachSession: async (id: unknown) => {
+      attached.push(id)
+    },
+  }
+  const source = { session: { id: 'parent-1', events: [] }, ctx: {} } as unknown as Agent
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => {
+        throw new Error('unused')
+      },
+      create: async (opts) => {
+        createOpts = opts as typeof createOpts
+        return created
+      },
+    },
+    {
+      sessions: { fork: () => ({ events: [] }) },
+      workspaceRegistry: {
+        resolveByPath: async () => workspace,
+        create: async () => {
+          throw new Error('create should not run when resolveByPath matches')
+        },
+      },
+    },
+  )
+  const resolved = await forkSession(ctx, source, OPTIONS, META)
+  assert.equal(resolved.agent, created.agent)
+  assert.equal(attached.length, 1)
+  assert.equal(attached[0], createOpts?.sessionId)
 })

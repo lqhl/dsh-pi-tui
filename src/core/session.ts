@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
+import type { WorkspaceRegistryService } from './services.js'
 
 export interface ResolvedAgent {
   agent: Agent
@@ -49,6 +50,37 @@ async function composeSetup(
     }
   } catch {
     return {}
+  }
+}
+
+/**
+ * Attach a freshly created session to the workspace owning its cwd, creating
+ * the workspace when the directory is not registered yet. The web host does
+ * this inside its `create`/`fork` RPC handlers (`workspace.attachSession`);
+ * the TUI creates agents in-process through `ctx.agents.create` and bypasses
+ * that layer, so without this the session's cwd never enters any workspace's
+ * `sessionIds` account and the web sidebar files it under "Ungrouped".
+ *
+ * Best-effort: missing registry or a failed attach logs a warning instead of
+ * failing session creation.
+ */
+async function attachToWorkspace(
+  ctx: Context,
+  sessionId: SessionId,
+  cwd: string | undefined,
+): Promise<void> {
+  if (cwd === undefined || cwd === '') return
+  const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+  if (registry === undefined) return
+  try {
+    const workspace = (await registry.resolveByPath(cwd)) ?? (await registry.create(cwd))
+    await workspace.attachSession(sessionId)
+  } catch (error) {
+    ctx.logger.warn(
+      `pi-tui: workspace attach for "${String(sessionId)}" failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
   }
 }
 
@@ -107,10 +139,12 @@ export async function resolveAgent(
       )
     }
   }
+  const composition = await composeSetup(ctx, meta.agentPreset)
+  const sessionId = SessionId(randomUUID())
+  let created: AgentHandle
   try {
-    const composition = await composeSetup(ctx, meta.agentPreset)
-    const created = await ctx.agents.create({
-      sessionId: SessionId(randomUUID()),
+    created = await ctx.agents.create({
+      sessionId,
       meta: {
         ...meta,
         ...(composition.agentPreset !== undefined ? { agentPreset: composition.agentPreset } : {}),
@@ -118,7 +152,6 @@ export async function resolveAgent(
       agentOptions,
       ...(composition.setup !== undefined ? { setup: composition.setup } : {}),
     })
-    return { agent: created.agent, handle: created }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(
@@ -126,6 +159,11 @@ export async function resolveAgent(
       { cause: error },
     )
   }
+  // Best-effort workspace grouping sits OUTSIDE the create try/catch: a failed
+  // attach must never be reported as an agent-create failure (attachToWorkspace
+  // already logs and swallows its own errors).
+  await attachToWorkspace(ctx, sessionId, meta.cwd)
+  return { agent: created.agent, handle: created }
 }
 
 /**
@@ -151,8 +189,9 @@ export async function forkSession(
     ctx,
     meta.agentPreset ?? presets?.composedPreset(source.ctx),
   )
+  const childId = SessionId(randomUUID())
   const created = await ctx.agents.create({
-    sessionId: SessionId(randomUUID()),
+    sessionId: childId,
     seed,
     meta: {
       ...meta,
@@ -162,6 +201,7 @@ export async function forkSession(
     agentOptions,
     ...(composition.setup !== undefined ? { setup: composition.setup } : {}),
   })
+  await attachToWorkspace(ctx, childId, meta.cwd)
   return { agent: created.agent, handle: created }
 }
 
