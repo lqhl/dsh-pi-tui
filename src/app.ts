@@ -125,8 +125,8 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
       cwd: config.cwd,
       preset,
     },
-    onQuit: () => {
-      disposeRootAndExit(ctx, 0)
+    onQuit: (hint) => {
+      disposeRootAndExit(ctx, 0, hint)
     },
     onAgentSwitch: (next: ResolvedAgent) => {
       const old = current
@@ -167,17 +167,23 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
  * Dispose the whole application tree before process exit, with a bounded
  * fallback (mirrors cc-tui's disposeRootAndExit semantics).
  */
-function disposeRootAndExit(ctx: Context, code: number): void {
-  const timer = setTimeout(() => process.exit(code), 5000)
+function disposeRootAndExit(ctx: Context, code: number, exitMessage?: string): void {
+  const finish = (): void => {
+    if (exitMessage !== undefined && exitMessage !== '') {
+      process.stdout.write(`\n${exitMessage}\n`)
+    }
+    process.exit(code)
+  }
+  const timer = setTimeout(finish, 5000)
   timer.unref()
   void ctx.root.fiber.dispose().then(
     () => {
       clearTimeout(timer)
-      process.exit(code)
+      finish()
     },
     () => {
       clearTimeout(timer)
-      process.exit(code)
+      finish()
     },
   )
 }

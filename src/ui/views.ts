@@ -19,13 +19,21 @@ import type { ChatItem } from '../core/model.js'
 import { markdownTheme, reasoningMarkdownTheme, style } from './theme.js'
 import { renderContextBar, sandboxShort, shortTokens } from '../core/format.js'
 
-/** Collapsed reasoning label; expanded/streaming renders the markdown body. */
+/**
+ * Collapsed reasoning label; expanded renders the markdown body. While the
+ * text is still streaming it renders as plain wrapped text instead of
+ * markdown: partial markdown re-parses on every delta and structures like
+ * tables re-flow their columns, which makes TuiMainScreen fall back to a
+ * full clear-and-redraw whenever the changed lines sit above the viewport —
+ * the visible "screen flicker" during long transcripts.
+ */
 export class ReasoningView extends Container {
   private body: Markdown
   private label: Text
+  private plain: Text
   private expanded = false
   private lastText = ''
-  private lastExpanded: boolean | undefined
+  private lastMode: 'label' | 'markdown' | 'plain' | undefined
   private item: ChatItem
 
   constructor(item: ChatItem) {
@@ -33,21 +41,29 @@ export class ReasoningView extends Container {
     this.item = item
     this.body = new Markdown('', 1, 0, reasoningMarkdownTheme)
     this.label = new Text('', 1, 0)
+    this.plain = new Text('', 1, 0)
   }
 
   updateFromItem(expanded: boolean): void {
     this.expanded = expanded
-    const showBody = this.item.streaming || expanded
-    if (this.lastExpanded !== showBody || this.lastText !== this.item.text) {
+    const mode: 'label' | 'markdown' | 'plain' = this.item.streaming
+      ? 'plain'
+      : expanded
+        ? 'markdown'
+        : 'label'
+    if (this.lastMode !== mode || this.lastText !== this.item.text) {
       this.clear()
-      if (showBody) {
+      if (mode === 'plain') {
+        this.plain.setText(this.item.text)
+        this.addChild(this.plain)
+      } else if (mode === 'markdown') {
         this.body.setText(this.item.text)
         this.addChild(this.body)
       } else {
         this.label.setText(style.thinkingLabel(`∴ Thinking · ${this.item.text.length} chars`))
         this.addChild(this.label)
       }
-      this.lastExpanded = showBody
+      this.lastMode = mode
       this.lastText = this.item.text
     }
   }
@@ -72,21 +88,32 @@ export class UserMessageView extends Text {
 
 export class AssistantMessageView extends Container {
   private markdown: Markdown
+  private plain: Text
   private item: ChatItem
   private lastText = ''
+  private lastStreaming = true
 
   constructor(item: ChatItem) {
     super()
     this.item = item
     this.markdown = new Markdown('', 1, 0, markdownTheme)
-    this.addChild(this.markdown)
+    this.plain = new Text('', 1, 0)
   }
 
   updateFromItem(): void {
-    if (this.lastText !== this.item.text) {
-      this.markdown.setText(this.item.text)
-      this.markdown.invalidate()
+    // Stream as plain wrapped text (stable, monotonic growth); apply markdown
+    // only once sealed. See ReasoningView for the flicker rationale.
+    if (this.lastText !== this.item.text || this.lastStreaming !== this.item.streaming) {
+      this.clear()
+      if (this.item.streaming) {
+        this.plain.setText(this.item.text)
+        this.addChild(this.plain)
+      } else {
+        this.markdown.setText(this.item.text)
+        this.addChild(this.markdown)
+      }
       this.lastText = this.item.text
+      this.lastStreaming = this.item.streaming
     }
   }
 }
@@ -129,6 +156,11 @@ export class ToolCardView implements Component {
   private lastRender: string | undefined
   private expand = false
   private images: { base64: string; mediaType: string }[] = []
+  /** Cached Image components: a fresh `Image` per render allocates a new
+   * kitty image id every frame, churning the graphics protocol and forcing
+   * extra full redraws (flicker). Reuse them; only width changes rebuild. */
+  private imageViews: Image[] = []
+  private imageViewsWidth = -1
 
   constructor(item: ChatItem) {
     this.item = item
@@ -141,6 +173,8 @@ export class ToolCardView implements Component {
   /** Resolved inline images (filled by the screen after read_image results). */
   setImages(images: { base64: string; mediaType: string }[]): void {
     this.images = images
+    this.imageViews = []
+    this.imageViewsWidth = -1
   }
 
   render(width: number): string[] {
@@ -190,15 +224,19 @@ export class ToolCardView implements Component {
     if (this.expand && this.images.length > 0) {
       const capabilities = getCapabilities()
       if (capabilities.images !== null) {
-        for (const image of this.images) {
-          const component = new Image(
-            image.base64,
-            image.mediaType,
-            {
-              fallbackColor: (text) => chalk.dim(text),
-            },
-            { maxWidthCells: Math.max(10, inner - 2) },
+        if (this.imageViews.length !== this.images.length || this.imageViewsWidth !== width) {
+          this.imageViews = this.images.map(
+            (image) =>
+              new Image(
+                image.base64,
+                image.mediaType,
+                { fallbackColor: (text) => chalk.dim(text) },
+                { maxWidthCells: Math.max(10, inner - 2) },
+              ),
           )
+          this.imageViewsWidth = width
+        }
+        for (const component of this.imageViews) {
           for (const line of component.render(width)) {
             lines.push(`${border} ${line}`)
           }

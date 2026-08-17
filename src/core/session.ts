@@ -84,6 +84,33 @@ async function attachToWorkspace(
   }
 }
 
+/** Copy-pasteable resume command for a persisted session. */
+export function resumeCommand(sessionId: string): string {
+  return `dsh --profile pi-tui --resume ${sessionId}`
+}
+
+/**
+ * Attach a freshly created/forked session to its cwd's workspace on the
+ * FIRST durable event instead of at creation. A session that never produces
+ * any event leaves nothing behind: the persistence backend already skips
+ * zero-event sessions in `list()`, and this keeps the workspace record
+ * empty too. `attachToWorkspace` still swallows its own errors.
+ */
+export function attachWorkspaceOnFirstEvent(
+  ctx: Context,
+  sessionId: SessionId,
+  cwd: string | undefined,
+): void {
+  if (cwd === undefined || cwd === '') return
+  const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+  if (registry === undefined) return
+  const off = ctx.on('session/event', (session) => {
+    if (session.id !== sessionId) return
+    off()
+    void attachToWorkspace(ctx, sessionId, cwd)
+  })
+}
+
 /** The preset a persisted session runs (last selection event, else header). */
 async function persistedPreset(ctx: Context, id: string): Promise<string | undefined> {
   try {
@@ -159,10 +186,10 @@ export async function resolveAgent(
       { cause: error },
     )
   }
-  // Best-effort workspace grouping sits OUTSIDE the create try/catch: a failed
-  // attach must never be reported as an agent-create failure (attachToWorkspace
-  // already logs and swallows its own errors).
-  await attachToWorkspace(ctx, sessionId, meta.cwd)
+  // Workspace grouping is deferred to the first durable event: a failed attach
+  // must never be reported as an agent-create failure, and an empty session
+  // (never any event) should leave no workspace record behind.
+  attachWorkspaceOnFirstEvent(ctx, sessionId, meta.cwd)
   return { agent: created.agent, handle: created }
 }
 
@@ -201,7 +228,7 @@ export async function forkSession(
     agentOptions,
     ...(composition.setup !== undefined ? { setup: composition.setup } : {}),
   })
-  await attachToWorkspace(ctx, childId, meta.cwd)
+  attachWorkspaceOnFirstEvent(ctx, childId, meta.cwd)
   return { agent: created.agent, handle: created }
 }
 

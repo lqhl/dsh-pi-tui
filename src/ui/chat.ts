@@ -59,7 +59,13 @@ import { collectProjection } from '../core/projection.js'
 import { editorTheme, style } from './theme.js'
 import { createView, StatusBar, ToolCardView, updateView, type StatusBarData } from './views.js'
 import { listAllModels, pickModel, type LlmRuntimeLike, type ModelRoute } from './model-picker.js'
-import { forkSession, listSessions, resolveAgent, type ResolvedAgent } from '../core/session.js'
+import {
+  forkSession,
+  listSessions,
+  resolveAgent,
+  resumeCommand,
+  type ResolvedAgent,
+} from '../core/session.js'
 import { pickFromListWithSearch } from './overlays.js'
 import { buildBanner } from './banner.js'
 
@@ -73,7 +79,7 @@ export interface ChatScreenOptions {
     cwd?: string
     preset?: string
   }
-  onQuit: () => void
+  onQuit: (resumeHint?: string) => void
   /** Called after a successful in-session agent switch (new/fork/resume). */
   onAgentSwitch?: (resolved: ResolvedAgent) => void
 }
@@ -177,13 +183,13 @@ export class ChatScreen {
         this.exitArm = state
         if (action === 'cancel') this.interrupt()
         else if (action === 'clear') this.editor.setText('')
-        else if (action === 'exit') options.onQuit()
+        else if (action === 'exit') options.onQuit(this.resumeHint())
         if (arm) this.pushNotice('Press Ctrl+C again to exit')
         return { consume: true }
       }
       if (matchesKey(data, 'ctrl+d')) {
         if (this.editor.getText() === '' && !this.isWorking()) {
-          options.onQuit()
+          options.onQuit(this.resumeHint())
           return { consume: true }
         }
         return undefined // editor handles delete-forward
@@ -248,6 +254,12 @@ export class ChatScreen {
   /** The session id the screen currently renders. */
   get currentSessionId(): string {
     return String(this.agent.session.id)
+  }
+
+  /** Copy-pasteable resume hint, or undefined when the session has no durable events. */
+  private resumeHint(): string | undefined {
+    if (this.agent.session.events.length === 0) return undefined
+    return `resume: ${resumeCommand(this.currentSessionId)}`
   }
 
   /**
@@ -423,6 +435,8 @@ export class ChatScreen {
       this.pushNotice('cannot switch sessions while work is running (Esc to interrupt)', 'error')
       return
     }
+    const previousId = this.currentSessionId
+    const previousHasContent = this.agent.session.events.length > 0
     try {
       const resolved = await resolveAgent(
         this.ctx,
@@ -431,7 +445,12 @@ export class ChatScreen {
         this.sessionMeta(),
       )
       this.commitSwitch(resolved)
-      this.pushNotice(`new session ${this.currentSessionId.slice(0, 8)}`)
+      this.pushNotice(
+        `new session ${this.currentSessionId.slice(0, 8)} · ${resumeCommand(this.currentSessionId)}`,
+      )
+      if (previousHasContent) {
+        this.pushNotice(`previous ${previousId.slice(0, 8)} · ${resumeCommand(previousId)}`)
+      }
     } catch (error) {
       this.pushNotice(
         `/new failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -454,7 +473,7 @@ export class ChatScreen {
       )
       this.commitSwitch(resolved)
       this.pushNotice(
-        `forked → ${this.currentSessionId.slice(0, 8)} (history kept, lineage recorded)`,
+        `forked → ${this.currentSessionId.slice(0, 8)} (history kept, lineage recorded) · ${resumeCommand(this.currentSessionId)}`,
       )
     } catch (error) {
       this.pushNotice(
