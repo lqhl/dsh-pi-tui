@@ -15,7 +15,7 @@ dsh --profile pi-tui --preset <id>            # 选择 agent preset（standard/m
 dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 ```
 
-会话与 web profile 共享 `~/.dsh/sessions` 持久化存储，两端互通。
+会话与 web profile 共享 `~/.dsh/sessions` 持久化存储，两端互通。退出时若当前会话没有任何人类提示（`user/message` 且 `source.kind === 'user'`；缺少 source 的旧日志也视为人类，inject 除外），会把会话目录移到废纸篓（macOS Trash 或 `~/.dsh/sessions-trash`），不永久删除。`/nav` fork 的 seed 里若已有父会话的 user 消息则会保留。插件配置 `discardEmptyOnQuit: false` 可关闭。
 
 ## 键位
 

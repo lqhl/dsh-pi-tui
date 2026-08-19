@@ -29,6 +29,11 @@ export interface Config {
   model?: string
   /** Session working directory; defaults to the invoking directory. */
   cwd?: string
+  /**
+   * Trash the live session on quit when it has no human prompt.
+   * Default true; set false to keep empty sessions.
+   */
+  discardEmptyOnQuit?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -36,6 +41,7 @@ export const Config: Schema<Config> = Schema.object({
   provider: Schema.string().required(false),
   model: Schema.string().required(false),
   cwd: Schema.string().required(false),
+  discardEmptyOnQuit: Schema.boolean().default(true).required(false),
 })
 
 /**
