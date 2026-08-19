@@ -20,15 +20,21 @@ function event(type: string, data?: unknown): { type: string; data?: unknown } {
   return data === undefined ? { type } : { type, data }
 }
 
-function header(id: string): SessionHeader {
-  return { version: 0, id: id as SessionHeader['id'], createdAt: 1 }
+function header(id: string, cwd?: string): SessionHeader {
+  return {
+    version: 0,
+    id: id as SessionHeader['id'],
+    createdAt: 1,
+    ...(cwd !== undefined ? { cwd } : {}),
+  }
 }
 
 function sessionOf(
   id: string,
   events: readonly { type?: string; data?: unknown }[],
+  cwd?: string,
 ): EmptyQuitSession {
-  return { id, header: header(id), events }
+  return { id, header: header(id, cwd), events }
 }
 
 function makeCtx(
@@ -159,7 +165,7 @@ test('discardEmptySession: locate+rename only for a session with no human prompt
   }
   const workspace = {
     path: '/tmp',
-    sessionIds: ['sess-empty', 'sess-kept'],
+    sessionIds: [] as string[],
     attachSession: async () => {},
     detachSession: async (id: unknown) => {
       detached.push(String(id))
@@ -168,11 +174,16 @@ test('discardEmptySession: locate+rename only for a session with no human prompt
   const ctx = makeCtx({
     sessionPersistence: persistence,
     sessions,
-    workspaceRegistry: { list: () => [workspace] },
+    workspaceRegistry: {
+      resolveByPath: async (path: string) => (path === '/tmp' ? workspace : undefined),
+    },
   })
 
   await withTrashEnv(trash, async () => {
-    const empty = await discardEmptySession(ctx, sessionOf('sess-empty', [event('turn/start')]))
+    const empty = await discardEmptySession(
+      ctx,
+      sessionOf('sess-empty', [event('turn/start')], '/tmp'),
+    )
     assert.equal(empty.discarded, true)
     assert.equal(empty.detached, true)
     assert.equal(empty.workspaceDetached, true)
@@ -181,7 +192,7 @@ test('discardEmptySession: locate+rename only for a session with no human prompt
 
     const kept = await discardEmptySession(
       ctx,
-      sessionOf('sess-kept', [event('user/message', { source: { kind: 'user' } })]),
+      sessionOf('sess-kept', [event('user/message', { source: { kind: 'user' } })], '/tmp'),
     )
     assert.equal(kept.discarded, false)
     assert.equal(kept.reason, 'has-human-prompt')
@@ -382,29 +393,53 @@ test('discardEmptySession: locate failure leaves the directory and is not discar
   await rm(root, { recursive: true, force: true })
 })
 
+test('discardEmptySession: human prompt arriving during detach is not trashed', async () => {
+  const { root, sessionDir, trash } = await sessionOnDisk('sess-race')
+  const events: { type?: string; data?: unknown }[] = [event('turn/start')]
+  const session = { id: 'sess-race', header: header('sess-race', '/tmp'), events }
+  const ctx = makeCtx({
+    sessionPersistence: {
+      locate: () => ({ kind: 'jsonl', path: join(sessionDir, 'session.jsonl') }),
+    },
+    workspaceRegistry: {
+      resolveByPath: async () => ({
+        path: '/tmp',
+        sessionIds: [],
+        attachSession: async () => {},
+        detachSession: async () => {
+          events.push(event('user/message', { source: { kind: 'user' } }))
+        },
+      }),
+    },
+  })
+  await withTrashEnv(trash, async () => {
+    const result = await discardEmptySession(ctx, session)
+    assert.equal(result.discarded, false)
+    assert.equal(result.reason, 'has-human-prompt')
+    assert.equal(existsSync(sessionDir), true)
+  })
+  await rm(root, { recursive: true, force: true })
+})
+
 test('quitAndExit: cleanup failure still disposes the root with the resume hint', async () => {
   const { root, sessionDir, trash } = await sessionOnDisk('sess-fail')
   const hint = 'resume: dsh --profile pi-tui --resume sess-fail'
-  const warns: string[] = []
-  const ctx = makeCtx(
-    {
-      sessionPersistence: {
-        locate: () => {
-          throw new Error('locate failed')
-        },
-      },
-      workspaceRegistry: {
-        list: () => {
-          throw new Error('workspace list failed')
-        },
+  const ctx = makeCtx({
+    sessionPersistence: {
+      locate: () => {
+        throw new Error('locate failed')
       },
     },
-    (msg) => warns.push(msg),
-  )
+    workspaceRegistry: {
+      resolveByPath: async () => {
+        throw new Error('workspace resolve failed')
+      },
+    },
+  })
   await withTrashEnv(trash, async () => {
     const { exits, writes } = await captureQuit(
       ctx,
-      sessionOf('sess-fail', [event('turn/start')]),
+      sessionOf('sess-fail', [event('turn/start')], '/tmp'),
       true,
       hint,
     )
@@ -414,10 +449,6 @@ test('quitAndExit: cleanup failure still disposes the root with the resume hint'
       true,
     )
     assert.equal(existsSync(sessionDir), true)
-    assert.equal(
-      warns.some((msg) => msg.includes('discard-empty-on-quit failed')),
-      true,
-    )
   })
   await rm(root, { recursive: true, force: true })
 })

@@ -140,6 +140,9 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
     onQuit: (hint) => {
       // Must run on the quit path (sync-before-exit), not in an apply()
       // disposer: those fire too late or mutate the host after teardown.
+      // Stop the TUI first so a trailing submit cannot land while we await
+      // workspace detach / trash.
+      tui.stop()
       void quitAndExit(ctx, current, config.discardEmptyOnQuit !== false, hint)
     },
     onAgentSwitch: (next: ResolvedAgent) => {

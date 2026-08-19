@@ -91,6 +91,12 @@ export async function discardEmptySession(
   const detached = detachLiveSession(ctx, session)
   const workspaceDetached = await detachFromWorkspaces(ctx, session)
 
+  // Recheck after the await: onQuit is fire-and-forget and a trailing
+  // submit can append a human prompt while detachSession is in flight.
+  if (sessionHasHumanPrompt(session)) {
+    return { discarded: false, reason: 'has-human-prompt', detached, workspaceDetached }
+  }
+
   const persistence = ctx.get('sessionPersistence') as SessionPersistenceLocateService | undefined
   let trashed: string | undefined
   let leftover = false
@@ -190,22 +196,23 @@ function detachLiveSession(ctx: Context, session: EmptyQuitSession): boolean {
 
 async function detachFromWorkspaces(ctx: Context, session: EmptyQuitSession): Promise<boolean> {
   const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
-  if (registry?.list === undefined) return false
+  const cwd = session.header.cwd
+  if (registry === undefined || cwd === undefined || cwd === '') return false
   const id = String(session.id)
-  let detached = false
-  for (const workspace of registry.list()) {
-    if (!workspace.sessionIds.some((candidate) => String(candidate) === id)) continue
-    if (workspace.detachSession === undefined) continue
-    try {
-      await workspace.detachSession(SessionId(String(session.id)))
-      detached = true
-    } catch (error) {
-      ctx.logger.warn(
-        `pi-tui: workspace detach of empty session "${id}" failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      )
-    }
+  try {
+    // Resolve by cwd and detach unconditionally. Filtered `sessionIds` can
+    // hide a TUI-created id that is already in the durable workspace record
+    // (startup index vs attachWorkspaceOnFirstEvent).
+    const workspace = await registry.resolveByPath(cwd)
+    if (workspace?.detachSession === undefined) return false
+    await workspace.detachSession(SessionId(id))
+    return true
+  } catch (error) {
+    ctx.logger.warn(
+      `pi-tui: workspace detach of empty session "${id}" failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+    return false
   }
-  return detached
 }
