@@ -3,7 +3,7 @@
  * `ctx.get(...)`. Centralized so a shape drift in a dsh rc upgrade is fixed
  * in one place instead of scattered inline `as` casts.
  */
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 
 export interface SessionProjectionsService {
   snapshot(session: unknown): { values: Record<string, unknown> }
@@ -35,10 +35,27 @@ export interface WorkspaceService {
    */
   readonly sessionIds: readonly string[]
   attachSession(sessionId: SessionId): Promise<void>
+  detachSession?(sessionId: SessionId): Promise<void>
 }
 
 /** Minimal `ctx.workspaceRegistry` surface: resolve-or-create by directory path. */
 export interface WorkspaceRegistryService {
   resolveByPath(path: string): Promise<WorkspaceService | undefined>
   create(path: string, title?: string): Promise<WorkspaceService>
+  /** Synchronous durable-order projection (used on the empty-quit path). */
+  list?(): WorkspaceService[]
+}
+
+/** `sessionPersistence.locate` — resolve the on-disk artifact without I/O. */
+export interface SessionPersistenceLocateService {
+  locate(meta: SessionHeader): { kind: string; path: string } | undefined
+}
+
+/** Best-effort live-store detach used when trashing an empty session on quit. */
+export interface SessionsDetachService {
+  store?: {
+    get?(id: string): unknown
+    delete?(id: string): void
+  }
+  detachEntered?(entry: unknown): void
 }

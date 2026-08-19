@@ -9,6 +9,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { TuiAltScreen, type ViewportTUI } from '@earendil-works/pi-tui'
 import { parseArgs, USAGE } from './args.js'
+import { discardEmptySessionOnQuit } from './core/empty-quit.js'
 import {
   listPresets,
   listSessions,
@@ -29,6 +30,8 @@ export interface AppConfig {
   provider?: string
   model?: string
   cwd?: string
+  /** Trash the live session on quit when it has no human prompt (default true). */
+  discardEmptyOnQuit?: boolean
 }
 
 /**
@@ -135,7 +138,9 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
       preset,
     },
     onQuit: (hint) => {
-      disposeRootAndExit(ctx, 0, hint)
+      // Must run on the quit path (sync-before-exit), not in an apply()
+      // disposer: those fire too late or mutate the host after teardown.
+      void quitAndExit(ctx, current, config.discardEmptyOnQuit !== false, hint)
     },
     onAgentSwitch: (next: ResolvedAgent) => {
       const old = current
@@ -179,6 +184,32 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
     tui.stop()
     void terminal.drainInput(1000, 50)
   })
+}
+
+/**
+ * Trash the live session when it has no human prompt, then dispose the tree.
+ * The resume hint is suppressed for discarded sessions — the id is gone.
+ */
+export async function quitAndExit(
+  ctx: Context,
+  current: ResolvedAgent,
+  discardEmpty: boolean,
+  hint: string | undefined,
+): Promise<void> {
+  const session = current.agent.session
+  try {
+    if (await discardEmptySessionOnQuit(ctx, session, discardEmpty)) {
+      disposeRootAndExit(ctx, 0)
+      return
+    }
+  } catch (error) {
+    ctx.logger.warn(
+      `pi-tui: discard-empty-on-quit failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+  }
+  disposeRootAndExit(ctx, 0, hint)
 }
 
 /**
