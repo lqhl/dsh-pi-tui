@@ -22,7 +22,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, relative } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { createUserMessage, ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { isUserInvocable, type SkillSummary } from '@deepseek-ai/dsh-skill'
@@ -44,6 +44,7 @@ import {
 } from '@earendil-works/pi-tui'
 import {
   applyEvent,
+  applyStreamFrame,
   createModel,
   pushNotice,
   textOf,
@@ -58,6 +59,7 @@ import {
   AgentDefaultModelService,
   JobsService,
   SessionProjectionsService,
+  type ShellService,
 } from '../core/services.js'
 import { runRgFiles, shouldShowPath } from '../core/files.js'
 import { foldWindow, visibleItemsBefore, type FoldWindow } from '../core/fold.js'
@@ -353,7 +355,7 @@ export class ChatScreen {
 
   /** Copy-pasteable resume hint, or undefined when the session has no durable events. */
   private resumeHint(): string | undefined {
-    if (this.agent.session.events.length === 0) return undefined
+    if (this.agent.session.seq === 0) return undefined
     return `resume: ${resumeCommand(this.currentSessionId)}`
   }
 
@@ -369,6 +371,22 @@ export class ChatScreen {
 
   ownsSession(id: unknown): boolean {
     return id === this.agent.session.id || String(id) === String(this.agent.session.id)
+  }
+
+  /**
+   * Scroll the transcript viewport by one page. pi-tui hands viewport keys to
+   * a focused overlay, so the plan-review decision bar forwards PgUp/PgDn here
+   * (the full plan lives in the transcript's exit_plan_mode card).
+   */
+  pageTranscript(delta: 1 | -1): void {
+    const view = this.transcriptScroll
+    if (view === undefined) return
+    // Mirror pi-tui's own page step (PAGE_SCROLL_OVERLAP keeps one line of
+    // context across the jump).
+    const overlap = 4
+    const lines = Math.max(1, view.viewportHeight - overlap)
+    view.scrollBy(delta === -1 ? -lines : lines)
+    this.tui.requestRender()
   }
 
   /**
@@ -422,7 +440,7 @@ export class ChatScreen {
     }
     this.seedSelection()
     this.disposeSelection = installModelSelection(this.agent.ctx, this.selection)
-    for (const event of next.session.events) {
+    for (const event of next.session.snapshotEvents()) {
       this.handleEvent(event)
     }
     this.seedHistory()
@@ -544,7 +562,7 @@ export class ChatScreen {
       return
     }
     const previousId = this.currentSessionId
-    const previousHasContent = this.agent.session.events.length > 0
+    const previousHasContent = this.agent.session.seq > 0
     try {
       const resolved = await resolveAgent(
         this.ctx,
@@ -809,7 +827,7 @@ export class ChatScreen {
     const controller = new AbortController()
     this.slashAbort = controller
     try {
-      const execution = await this.commands.execute(this.agent, line, controller.signal)
+      const execution = await this.commands.execute(this.agent, line, [], controller.signal)
       if (execution !== undefined) {
         const result = execution.result
         if (result.kind === 'success') this.pushNotice(result.text ?? line)
@@ -1252,7 +1270,7 @@ export class ChatScreen {
         this.copyToClipboard(this.currentSessionId, 'session id')
         return
       case 'resume': {
-        if (this.agent.session.events.length === 0) {
+        if (this.agent.session.seq === 0) {
           this.pushNotice('session has no durable content yet', 'error')
           return
         }
@@ -1395,16 +1413,7 @@ export class ChatScreen {
       this.pushNotice('a shell command is already running — press Esc to cancel it first', 'error')
       return
     }
-    const shell = this.ctx.get('shell') as
-      | {
-          start(spec: {
-            command: string
-            workdir?: string
-            signal?: AbortSignal
-            sandboxPolicy?: { mode: string; workspaceRoot: string }
-          }): BashProcess
-        }
-      | undefined
+    const shell = this.ctx.get('shell') as ShellService | undefined
     if (shell === undefined) {
       this.pushNotice('shell service unavailable', 'error')
       return
@@ -1416,12 +1425,14 @@ export class ChatScreen {
     this.sync()
 
     try {
-      const process = shell.start({
-        command,
-        workdir: this.cwd,
-        signal: this.bashAbort.signal,
-        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: this.cwd },
-      })
+      const process = await shell.execute(
+        shell.resolve({
+          command,
+          workdir: this.cwd,
+          signal: this.bashAbort.signal,
+          sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: this.cwd },
+        }),
+      )
       // Drain incremental output until the process settles: read first (no
       // initial lag), then wait for settlement or a short poll tick.
       let output = ''
@@ -1456,10 +1467,11 @@ export class ChatScreen {
         this.agent.inject(
           createUserMessage({
             content: [{ type: 'text', text: `$ ${command}${output === '' ? '' : `\n${output}`}` }],
-            // A plugin source (not `user`) so the fold does not render this
-            // injected context as a second user bubble — the notice card
-            // above is the visible record; this only feeds the model.
-            source: { kind: 'plugin', plugin: 'pi-tui' },
+            // This plugin's own producer kind (declared in core/model.ts),
+            // not `user`, so the fold does not render this injected context
+            // as a second user bubble — the notice card above is the visible
+            // record; this only feeds the model.
+            source: { kind: 'pi-tui' },
           }),
         )
       }
@@ -1619,13 +1631,21 @@ export class ChatScreen {
     this.sync()
   }
 
-  /** Fold one session event and reconcile the component tree. */
+  /** Fold one durable session event and reconcile the component tree. */
   handleEvent(event: SessionEvent): void {
     applyEvent(this.model, event)
     if (event.type === 'tool/result') void this.resolveImages(event)
-    // Skip the jobs re-count during the chunk hot path; the next non-chunk
-    // event (or explicit sync) refreshes it.
-    this.sync(event.type !== 'assistant/chunk')
+    this.sync()
+  }
+
+  /**
+   * Fold one live `agent/assistant-stream` frame and reconcile. Stream frames
+   * are the hot path, so the (process-local) background-job recount is
+   * skipped here; the next durable event or explicit sync refreshes it.
+   */
+  handleStreamFrame(frame: AssistantStreamFrame): void {
+    applyStreamFrame(this.model, frame)
+    this.sync(false)
   }
 
   /** Count the agent's running background jobs (process-local snapshot). */
@@ -1699,8 +1719,7 @@ export class ChatScreen {
       this.pushNotice('set $EDITOR (or $VISUAL) to use the external editor', 'error')
       return
     }
-    const shell = this.ctx.get('shell') as
-      { run(req: unknown): Promise<{ exitCode: number | null }> } | undefined
+    const shell = this.ctx.get('shell') as ShellService | undefined
     if (shell === undefined) {
       this.pushNotice('shell service unavailable', 'error')
       return
@@ -1709,12 +1728,16 @@ export class ChatScreen {
     await writeFile(tmp, this.editor.getText(), 'utf8')
     this.tui.stop()
     try {
-      await shell.run({
-        command: `${editor} ${JSON.stringify(tmp)}`,
-        workdir: this.cwd,
-        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: this.cwd },
-        timeoutMs: 30 * 60 * 1000,
-      })
+      await (
+        await shell.execute(
+          shell.resolve({
+            command: `${editor} ${JSON.stringify(tmp)}`,
+            workdir: this.cwd,
+            sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: this.cwd },
+            timeoutMs: 30 * 60 * 1000,
+          }),
+        )
+      ).result()
       const text = await readFile(tmp, 'utf8')
       this.editor.setText(text)
     } finally {
@@ -1995,15 +2018,6 @@ export class ChatScreen {
 
 export function createTui(terminal: import('@earendil-works/pi-tui').Terminal): ViewportTUI {
   return new TuiAltScreen(terminal)
-}
-
-/** Minimal ShellProcess surface the `!` command consumes. */
-interface BashProcess {
-  status: 'running' | 'completed' | 'killed'
-  exitCode: number | null
-  signal: string | null
-  readonly done: Promise<void>
-  readOutput(): { delta: string; lossy: boolean }
 }
 
 /**

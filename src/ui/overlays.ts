@@ -315,12 +315,24 @@ export function confirmApproval(tui: TUI, request: ApprovalRequest): Promise<App
  * Options render as a select list (multi-select accumulates with a Done
  * entry); questions without options render a single-line text input.
  */
+export interface AskQuestionsOptions {
+  /**
+   * Scroll the surface BEHIND a plan-review decision bar by one page
+   * (-1 = up, +1 = down). pi-tui hands viewport keys to a focused overlay, and
+   * the plan-review bar is deliberately tiny, so the caller that owns the
+   * transcript viewport supplies this: the full plan lives in the transcript
+   * (the exit_plan_mode tool card), not in the bar.
+   */
+  onPageScroll?: (delta: 1 | -1) => void
+}
+
 export function askQuestions(
   tui: TUI,
   request: AskUserQuestionRequest,
+  options: AskQuestionsOptions = {},
 ): Promise<AskUserQuestionAnswer> {
   const answers: AskUserQuestionAnswerItem[] = []
-  return step(tui, request, request.questions, 0, answers)
+  return step(tui, request, request.questions, 0, answers, options)
 }
 
 async function step(
@@ -329,6 +341,7 @@ async function step(
   questions: readonly AskUserQuestionItem[],
   index: number,
   answers: AskUserQuestionAnswerItem[],
+  options: AskQuestionsOptions,
 ): Promise<AskUserQuestionAnswer> {
   if (index >= questions.length) return { answers }
   const question = questions[index]
@@ -372,6 +385,7 @@ async function step(
         body,
         finish,
         planReview ? dismiss : () => finish(undefined),
+        options,
       )
     } else {
       handle = textStep(tui, question, body, finish)
@@ -380,7 +394,7 @@ async function step(
   })
 
   if (item !== undefined) answers.push(item)
-  return step(tui, request, questions, index + 1, answers)
+  return step(tui, request, questions, index + 1, answers, options)
 }
 
 /** Select-list step: single-select resolves on pick; multi-select accumulates. */
@@ -390,6 +404,7 @@ function optionsStep(
   body: string,
   finish: (value: AskUserQuestionAnswerItem | undefined) => void,
   cancel: () => void,
+  askOptions: AskQuestionsOptions,
 ): ReturnType<TUI['showOverlay']> {
   const options = question.options ?? []
   const multi = question.multiSelect === true
@@ -420,7 +435,7 @@ function optionsStep(
   )
   const planReview = approveLabel !== undefined
   const panel = planReview
-    ? new PlanReviewPanel(question, list)
+    ? new PlanReviewPanel(question, list, askOptions.onPageScroll)
     : new ListPanel(
         question.question,
         multi ? `${body}\n(multi-select: pick items, then Done)` : body,
@@ -466,10 +481,16 @@ function optionsStep(
 class PlanReviewPanel extends Container {
   private list: SelectList
   private readonly listChildIndex: number
+  private readonly onPageScroll: ((delta: 1 | -1) => void) | undefined
 
-  constructor(question: AskUserQuestionItem, list: SelectList) {
+  constructor(
+    question: AskUserQuestionItem,
+    list: SelectList,
+    onPageScroll?: (delta: 1 | -1) => void,
+  ) {
     super()
     this.list = list
+    this.onPageScroll = onPageScroll
     const title =
       question.header !== undefined && question.header !== '' ? question.header : 'Plan review'
     this.addChild(new Text(style.accent(title), 1, 0))
@@ -486,6 +507,18 @@ class PlanReviewPanel extends Container {
   }
 
   handleInput(data: string): void {
+    // pi-tui defers viewport keys to the focused overlay; this bar is tiny, so
+    // page keys belong to the transcript holding the full plan.
+    if (this.onPageScroll !== undefined) {
+      if (matchesKey(data, 'pageUp')) {
+        this.onPageScroll(-1)
+        return
+      }
+      if (matchesKey(data, 'pageDown')) {
+        this.onPageScroll(1)
+        return
+      }
+    }
     this.list.handleInput(data)
   }
 

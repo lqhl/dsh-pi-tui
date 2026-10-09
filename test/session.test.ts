@@ -293,7 +293,7 @@ test('defers workspace attach for a forked session until its first event', async
       },
     },
     {
-      sessions: { fork: () => ({ events: [] }) },
+      sessions: { fork: () => ({ snapshotEvents: () => [] }) },
       workspaceRegistry: {
         resolveByPath: async () => workspace,
         create: async () => {

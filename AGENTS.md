@@ -38,6 +38,31 @@ CI 对每个 PR 跑同样四步；pre-commit hook（husky + lint-staged）在提
 - 类型安全：`tsconfig` 开了 `strict`。优先复用 `@deepseek-ai/dsh-*` 的导出类型；跨文件的服务面类型集中在 `src/core/services.ts`。
 - 纯逻辑放 `src/core/`（可单测、无终端依赖）；渲染放 `src/ui/`。新逻辑尽量配 `test/` 单测。
 
+## 依赖升级
+
+插件的运行时宿主是官方 `dsh` CLI，因此 `@deepseek-ai/dsh-*` 与 `@deepseek-ai/cordis` 的版本必须与
+本机 `dsh` 对齐（`dsh --version`；rc 阶段的 `next` dist-tag 才是当前发行版，`latest` 常常是旧的）。
+`dsh` 加载插件时会校验 `peerDependencies`，不匹配会直接跳过整个 bundle。
+
+升级后**类型检查通过并不等于能跑**：`ctx.get(...)` 取到的服务面是手写 cast，服务方法改名/改形状
+（例如 `userQuestions.registerProvider` → `user-questions/request` 瀑布、`shell.start/run` →
+`shell.resolve/execute`）只会在运行时炸。改完依赖务必跑一次真实运行冒烟测试：
+
+```sh
+npm run build
+# 用工作区内的临时 DSH_HOME 起一个真实 profile（不动 ~/.dsh）
+mkdir -p .smoke-home/profiles/pi-tui/node_modules
+ln -s ~/.dsh/profiles/node_modules .smoke-home/profiles/node_modules
+ln -s "$PWD" .smoke-home/profiles/pi-tui/node_modules/dsh-pi-tui
+cp ~/.dsh/profiles/pi-tui/cordis.patch.yml .smoke-home/profiles/pi-tui/
+# cordis.yml = []，package.json 的 dsh.profile.bundles = ["@deepseek-ai/dsh-base","dsh-pi-tui"]
+DSH_HOME=$PWD/.smoke-home dsh --profile pi-tui --help   # 非交互：验证装载
+DSH_HOME=$PWD/.smoke-home script -qec "dsh --profile pi-tui" /dev/null   # 交互：PTY 下用真终端
+```
+
+最小可接受覆盖：启动 banner、一次流式回答、一次工具调用、`/resume` 重放、`/model` 与 `@` 选择器、
+`!` shell 注入、plan 模式的 plan-review 决策条。冒烟目录用完即删，不要提交。
+
 ## 注意
 
 - `lib/` 是编译产物，勿手改、勿提交。

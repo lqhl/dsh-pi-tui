@@ -64,24 +64,31 @@ function setup(plan: string) {
     },
   }
   messages.addChild(new ToolCardView(item))
+  const transcript = new ScrollView(messages, {
+    follow: 'end',
+    primary: true,
+    overscroll: 'chain',
+  })
   tui.setLayoutRoot(
     new VStack([
-      {
-        component: new ScrollView(messages, { follow: 'end', primary: true, overscroll: 'chain' }),
-        basis: 0,
-        grow: 1,
-        minSize: 1,
-      },
+      { component: transcript, basis: 0, grow: 1, minSize: 1 },
       { component: new Text('status bar', 1, 0), basis: 'auto', shrink: 1, minSize: 1 },
     ]),
   )
-  return { tui, terminal }
+  // The app wires the plan-review bar to the transcript viewport (pi-tui
+  // gives viewport keys to the focused overlay).
+  const pageScroll = (delta: 1 | -1): void => {
+    const lines = Math.max(1, transcript.viewportHeight - 4)
+    transcript.scrollBy(delta === -1 ? -lines : lines)
+    tui.requestRender()
+  }
+  return { tui, terminal, pageScroll }
 }
 
 test('alt-screen: PgUp scrolls the transcript plan while the decision bar stays pinned', async () => {
-  const { tui, terminal } = setup(PLAN)
+  const { tui, terminal, pageScroll } = setup(PLAN)
   tui.start()
-  const answerPromise = askQuestions(tui, planReviewRequest(PLAN))
+  const answerPromise = askQuestions(tui, planReviewRequest(PLAN), { onPageScroll: pageScroll })
   tui.requestRender()
   await tick()
 

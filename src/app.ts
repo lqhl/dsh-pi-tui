@@ -3,8 +3,9 @@
  *
  * Flow: parse app args → resolve or create the agent (session picker when
  * `--resume` has no id) → mount the ChatScreen → replay the durable
- * session log → subscribe to live `session/event` → quit on Ctrl+C by
- * disposing the whole tree (bounded fallback, cc-tui semantics).
+ * session log → subscribe to live `session/event` + `agent/assistant-stream`
+ * → quit on Ctrl+C by disposing the whole tree (bounded fallback, cc-tui
+ * semantics).
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { TuiAltScreen, type ViewportTUI } from '@earendil-works/pi-tui'
@@ -108,21 +109,8 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   // switch (new/fork/resume) — dropping it leaked its scoped context.
   let current: ResolvedAgent = resolved
 
-  // ── human-interaction seams ────────────────────────────────────────────────
-  // Approval waterfall answerer: answer permission questions for OUR agent
-  // only; every other request continues down the chain.
-  ctx.on('approval/request', (request, next) => {
-    if (!screenOwns(request.agent.id)) return next()
-    return confirmApproval(tui, request)
-  })
-
-  // ask_user_question provider: the TUI renders the questionnaire itself.
-  const userQuestions = ctx.get('userQuestions') as
-    | { registerProvider(provider: { ask(request: unknown): Promise<unknown> }): () => void }
-    | undefined
-  userQuestions?.registerProvider({
-    ask: (request) => askQuestions(tui, request as Parameters<typeof askQuestions>[1]),
-  })
+  // ── human-interaction seams (wired after the screen: the plan-review bar
+  // borrows the transcript viewport for PgUp/PgDn) ───────────────────────────
 
   const screen = new ChatScreen({
     ctx,
@@ -149,9 +137,35 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   })
   const screenOwns = (id: unknown): boolean => screen.ownsSession(id)
 
+  // Approval waterfall answerer: answer permission questions for OUR agent
+  // only; every other request continues down the chain.
+  ctx.on('approval/request', (request, next) => {
+    if (!screenOwns(request.agent.id)) return next()
+    return confirmApproval(tui, request)
+  })
+
+  // ask_user_question answerer: the TUI renders the questionnaire itself.
+  // 0.2.0-rc.2 replaced the old `userQuestions.registerProvider` seam with an
+  // agent-scoped waterfall, so this is a plain listener that claims requests
+  // for OUR agent and delegates the rest (mirroring the approval waterfall
+  // above). An agentless request is dispatched unscoped and has no other
+  // answerer in this single-session process, so we claim it too — otherwise
+  // it would fail with NO_PROVIDER. A request naming another agent (a
+  // subagent) is delegated: those are deliberately human-less.
+  //
+  // The plan-review bar borrows the transcript viewport for PgUp/PgDn,
+  // because pi-tui hands viewport keys to the focused overlay and the full
+  // plan is rendered in the transcript's tool card behind that bar.
+  ctx.on('user-questions/request', (request, next) => {
+    if (request.agent !== undefined && !screenOwns(request.agent.id)) return next()
+    return askQuestions(tui, request, {
+      onPageScroll: (delta) => screen.pageTranscript(delta),
+    })
+  })
+
   // Replay the durable log first so the transcript paints on the first
   // frame; only then subscribe, so no event is folded twice.
-  for (const event of agent.session.events) {
+  for (const event of agent.session.snapshotEvents()) {
     screen.handleEvent(event)
   }
   // ↑/↓ history: seed the editor from the replayed session transcript.
@@ -163,6 +177,16 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   ctx.on('session/event', (session, event) => {
     if (screenOwns(session.id)) {
       screen.handleEvent(event)
+    }
+  })
+
+  // Live model output is NOT a durable session event any more: deltas arrive
+  // as process-local `agent/assistant-stream` frames, and the durable
+  // `assistant/message` that settles the attempt arrives separately through
+  // `session/event`. Both feeds land in the same transcript model.
+  ctx.on('agent/assistant-stream', (payload) => {
+    if (screenOwns(payload.agent.id)) {
+      screen.handleStreamFrame(payload.frame)
     }
   })
 

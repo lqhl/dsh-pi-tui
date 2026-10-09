@@ -1,13 +1,43 @@
 /**
- * Pure transcript model: folds `session/event` records into a renderable
- * item list, independent of any UI. Unit-testable without a terminal.
+ * Pure transcript model: folds `session/event` records (plus the live
+ * `agent/assistant-stream` frames) into a renderable item list, independent
+ * of any UI. Unit-testable without a terminal.
  *
  * The fold mirrors cc-tui's channel state machine: user bubbles, per-step
  * streaming assistant text, per-step reasoning, and tool cards keyed by
  * `callId`, plus a working flag driven by turn boundaries.
+ *
+ * Two feeds, one transcript:
+ *   - `session/event` is the durable, authoritative log (replayed on boot and
+ *     resumed sessions): `user/message`, `assistant/message`, `tool/call`,
+ *     `tool/result`, `request/header`, turn boundaries.
+ *   - `agent/assistant-stream` carries process-local, non-durable
+ *     `AssistantStreamFrame`s (`start`/`chunk`/`end`) that paint deltas while
+ *     a model call runs. `assistant/message` then replaces the streamed text
+ *     with the assembled, durable message.
  */
+import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+
+/**
+ * This plugin's own user-message producer vocabulary. `MessageSourceMap` is
+ * merge-extensible and has no shared catch-all kind, so a producer declares
+ * its own: `!`/`!!` shell output the TUI injects into model context is
+ * `pi-tui`, never `user`, so the fold does not render it as a second bubble.
+ */
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'pi-tui': { kind: 'pi-tui' }
+  }
+}
+
+/**
+ * Producer kind dsh-compaction stamps on a checkpoint (`compactCheckpointSource`).
+ * Declared by a package this plugin does not depend on, so it is matched
+ * structurally rather than through the merge-extensible union.
+ */
+const COMPACT_CHECKPOINT_KIND = 'compact-checkpoint'
 
 export type ToolCardStatus = 'running' | 'ok' | 'error' | 'rejected'
 
@@ -88,6 +118,14 @@ export function createModel(): ChatModel {
 export function textOf(content: readonly ContentBlock[] | undefined): string {
   return (content ?? [])
     .map((block) => (block.type === 'text' ? block.text : ''))
+    .join('')
+    .trim()
+}
+
+/** Extract reasoning text from content blocks (reasoning blocks only). */
+export function reasoningOf(content: readonly ContentBlock[] | undefined): string {
+  return (content ?? [])
+    .map((block) => (block.type === 'reasoning' ? block.text : ''))
     .join('')
     .trim()
 }
@@ -183,8 +221,10 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
 
   switch (event.type) {
     case 'user/message': {
-      // Compaction checkpoint: render as a framed notice, not a bubble.
-      if (event.data.source.kind === 'plugin' && event.data.source.plugin === 'compact') {
+      // Compaction checkpoint: render as a framed notice, not a bubble. The
+      // checkpoint is a replacement user/message whose producer kind is
+      // `compact-checkpoint` (dsh-compaction), so match it structurally.
+      if ((event.data.source as { kind?: string }).kind === COMPACT_CHECKPOINT_KIND) {
         push({
           kind: 'notice',
           text: 'Conversation compacted',
@@ -205,7 +245,7 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
         break
       }
       // Only direct human prompts render as bubbles; other injected context
-      // (goal/skill sources) is skipped.
+      // (goal/skill/inbox sources) is skipped.
       if (event.data.source.kind !== 'user') break
       const text = textOf(event.data.content)
       if (text) {
@@ -214,31 +254,39 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       }
       break
     }
-    case 'assistant/chunk': {
-      const chunk = event.data.chunk
-      if (chunk.type === 'text-delta' && chunk.text) {
-        const item = currentStreaming(model, 'assistant', event.seq)
-        item.text += chunk.text
-      } else if (chunk.type === 'reasoning-delta' && chunk.text) {
-        const item = currentStreaming(model, 'reasoning', event.seq)
-        item.text += chunk.text
-      }
-      break
-    }
     case 'assistant/message': {
       // The assembled message is authoritative (chunks may have been
-      // compacted or pruned); replace the streamed text and seal.
+      // compacted or pruned); replace the streamed text and seal. Reasoning
+      // is rendered first: live deltas already opened that item, while a
+      // replayed log carries reasoning only here, inside the message.
+      const content = event.data.message.content
+      const reasoning = reasoningOf(content)
+      const openReasoning = model.openReasoning
+      if (openReasoning !== undefined) {
+        if (reasoning) openReasoning.text = reasoning
+        openReasoning.streaming = false
+        model.openReasoning = undefined
+      } else if (reasoning) {
+        push({ kind: 'reasoning', text: reasoning, streaming: false, seq: event.seq })
+      }
       const item = currentStreaming(model, 'assistant', event.seq)
-      const text = textOf(event.data.message.content)
+      const text = textOf(content)
       if (text) item.text = text
       item.streaming = false
       model.openAssistant = undefined
-      sealReasoning(model)
       const usage = event.data.usage
       if (usage !== undefined) {
         model.tokens.input += usage.inputTokens ?? 0
         model.tokens.output += usage.outputTokens ?? 0
       }
+      break
+    }
+    case 'assistant/attempt': {
+      // The attempt settled without committing model-visible history
+      // (failed, retried, or cancelled). Seal whatever the live frames
+      // painted so no item keeps streaming; the partial text stays visible
+      // as the record of that attempt.
+      sealOpenItems(model)
       break
     }
     case 'tool/call': {
@@ -267,14 +315,13 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
       if (card === undefined || card.tool === undefined) break
       card.streaming = false
 
-      const block = event.data.message.content[0]
-      const result =
-        block !== undefined && block.type === 'tool-result' ? textOf(block.content) : ''
+      // A ToolResultMessage carries the result blocks directly (text/image/
+      // file); there is no wrapping `tool-result` block any more.
+      const content = event.data.message.content
+      const result = textOf(content)
       // A plain `Error` thrown by a tool body carries no `event.data.error`
-      // (only HarnessErrors do); its failure is flagged on the result block.
-      const failed =
-        event.data.error !== undefined ||
-        (block !== undefined && block.type === 'tool-result' && block.isError === true)
+      // (only HarnessErrors do); its failure is flagged on the message.
+      const failed = event.data.error !== undefined || event.data.message.isError === true
 
       if (failed) {
         const notApproved =
@@ -296,18 +343,18 @@ export function applyEvent(model: ChatModel, event: SessionEvent): ChatModel {
         card.tool.resultPreview = preview(result, RESULT_PREVIEW_LIMIT)
         card.tool.resultFull = result
       }
-      const imageRefs = event.data.message.content
-        .flatMap((block) => (block.type === 'tool-result' ? block.content : []))
+      // Image results are durable attachment refs carried by image blocks;
+      // project them onto the card's plain, serializable shape.
+      const imageRefs: ImageAttachmentRef[] = content
         .filter((block) => block.type === 'image')
-        .map((block) => {
-          const attachment = (block as unknown as { attachment?: unknown }).attachment as
-            ImageAttachmentRef | undefined
-          return attachment
-        })
-        .filter(
-          (ref): ref is ImageAttachmentRef =>
-            ref !== undefined && typeof ref.attachmentId === 'string',
-        )
+        .map((block) => ({
+          attachmentId: String(block.attachment.attachmentId),
+          mediaType: String(block.attachment.mediaType),
+          bytes: block.attachment.bytes,
+          width: block.attachment.width,
+          height: block.attachment.height,
+          ...(block.attachment.name !== undefined ? { name: block.attachment.name } : {}),
+        }))
       if (imageRefs.length > 0) card.tool.imageRefs = imageRefs
       const meta = event.data.meta as { diffs?: unknown } | undefined
       if (meta !== undefined && Array.isArray(meta.diffs)) {
@@ -419,6 +466,50 @@ function sealReasoning(model: ChatModel): void {
     item.streaming = false
     model.openReasoning = undefined
   }
+}
+
+/** Seal both open streaming items (a settled attempt or an interrupted turn). */
+function sealOpenItems(model: ChatModel): void {
+  sealReasoning(model)
+  const assistant = model.openAssistant
+  if (assistant !== undefined) {
+    assistant.streaming = false
+    model.openAssistant = undefined
+  }
+}
+
+/**
+ * Fold one live `agent/assistant-stream` frame into the model. Frames are
+ * process-local and non-durable: `start`/`end` only bracket an attempt, and
+ * `chunk` frames paint deltas. The durable `assistant/message` (or
+ * `assistant/attempt`) that follows replaces or seals whatever was painted.
+ */
+export function applyStreamFrame(model: ChatModel, frame: AssistantStreamFrame): ChatModel {
+  switch (frame.type) {
+    case 'start': {
+      // A new attempt (possibly a retry after a sealed one) starts a fresh
+      // streaming item rather than appending to the previous attempt's text.
+      sealOpenItems(model)
+      break
+    }
+    case 'chunk': {
+      const chunk = frame.chunk
+      if (chunk.type === 'text-delta' && chunk.text !== '') {
+        currentStreaming(model, 'assistant').text += chunk.text
+      } else if (chunk.type === 'reasoning-delta' && chunk.text !== '') {
+        currentStreaming(model, 'reasoning').text += chunk.text
+      }
+      break
+    }
+    case 'end': {
+      // `committed` means the durable settlement already landed (its
+      // session/event sealed the item); `abandoned` means nothing follows,
+      // so seal here either way.
+      sealOpenItems(model)
+      break
+    }
+  }
+  return model
 }
 
 /** Push a UI-side notice (slash-command results, errors) into the transcript. */

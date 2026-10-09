@@ -265,11 +265,12 @@ export async function forkSession(
   meta: SessionMeta,
 ): Promise<ResolvedAgent> {
   const sessions = ctx.get('sessions') as
-    { fork(source: unknown, boundary?: number): { events: readonly SessionEvent[] } } | undefined
+    | { fork(source: unknown, boundary?: number): { snapshotEvents(): readonly SessionEvent[] } }
+    | undefined
   if (sessions === undefined) {
     throw new Error('pi-tui: sessions service unavailable for fork')
   }
-  const seed = sessions.fork(source.session).events
+  const seed = sessions.fork(source.session).snapshotEvents()
   const presets = ctx.get('agentPresets') as
     { composedPreset(agentCtx: Context): string | undefined } | undefined
   const composition = await composeSetup(

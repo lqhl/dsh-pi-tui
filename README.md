@@ -66,11 +66,11 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 
 ## 功能
 
-- 流式渲染：`assistant/chunk` 增量 → Markdown、thinking 折叠标签
+- 流式渲染：官方 `agent/assistant-stream` 增量帧 → Markdown、thinking 折叠标签（持久化日志里的 `assistant/message` 再做权威收敛，重放同样能看到 thinking）
 - 工具调用卡片：运行/成功/失败三态 + 参数与结果预览；Ctrl+O 展开完整输出；write/edit 结果带**彩色 diff 高亮**（官方 meta.diffs）
 - `read_image` 结果在 kitty/iTerm2 终端内联渲染图片（Ctrl+O 展开）
 - slash 命令：`/compact` `/goal` `/plan` `/feedback` 等全部来自官方 `ctx.commands` 注册表（自动补全 + 动态发现）
-- 权限审批弹窗（`approval/request`）与 `ask_user_question` 交互表单（选项/多选/自由文本；plan-review 特化弹窗）
+- 权限审批弹窗（`approval/request`）与用户问答瀑布（`user-questions/request`；选项/多选/自由文本；plan-review 特化决策条，PgUp/PgDn 滚动 transcript 里的完整 plan）
 - 会话管理：创建、恢复、fork、子代理树、选择器（官方持久化后端；resume 选择器显示官方自动标题）
 - 转录搜索：`Ctrl+F` 在 transcript 内搜索并跳转（输入即定位 + 高亮，↑/↓ 循环）；`/retry` 一键重发失败 turn；`/copy` 复制 assistant/工具结果/错误/id/resume 命令（OSC 52 三路剪贴板）
 - 长会话折叠：消息超过阈值自动折叠旧消息（`/expand-all` 展开）
@@ -81,10 +81,12 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 
 ## 支持矩阵
 
-| dsh        | node                    | 状态             |
-| ---------- | ----------------------- | ---------------- |
-| 0.1.0-rc.6 | >= 22.19（CI 跑 22/24） | ✅ 测试通过      |
-| 其他 rc    | —                       | 未验证，欢迎反馈 |
+| dsh                     | pi-tui | node                    | 状态             |
+| ----------------------- | ------ | ----------------------- | ---------------- |
+| 0.2.0-rc.2（当前 next） | ^1.1.0 | >= 22.19（CI 跑 22/24） | ✅ 端到端验证    |
+| 其他 rc                 | —      | —                       | 未验证，欢迎反馈 |
+
+`dsh` 在加载插件时会校验 `peerDependencies`；本版本只声明并验证 0.2.0-rc.2。
 
 发布：npm 上的每次发版由 GitHub Actions 经 [npm Trusted Publishers](https://docs.npmjs.com/trusted-publishers)（OIDC）发布，带 provenance 签名——打 `v*` tag 即发布，无任何 token。
 

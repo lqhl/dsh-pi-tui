@@ -1,10 +1,41 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { applyEvent, createModel, pushNotice, textOf } from '../src/core/model.js'
+import { applyEvent, applyStreamFrame, createModel, pushNotice, textOf } from '../src/core/model.js'
 
 function event(type: string, data: unknown, seq = 0): SessionEvent {
   return { seq, time: Date.now(), type, data } as unknown as SessionEvent
+}
+
+/** One live `agent/assistant-stream` frame wrapping a raw model chunk. */
+function frame(type: 'start' | 'end' | 'chunk', chunk?: unknown): AssistantStreamFrame {
+  if (type === 'start') {
+    return {
+      type,
+      attemptId: 'a1',
+      revision: 1,
+      turn: 1,
+      step: 1,
+    } as unknown as AssistantStreamFrame
+  }
+  if (type === 'end') {
+    return {
+      type,
+      attemptId: 'a1',
+      revision: 1,
+      index: 0,
+      outcome: { kind: 'abandoned' },
+    } as unknown as AssistantStreamFrame
+  }
+  return {
+    type: 'chunk',
+    attemptId: 'a1',
+    revision: 1,
+    index: 0,
+    time: 0,
+    chunk,
+  } as unknown as AssistantStreamFrame
 }
 
 test('folds a direct user prompt into a user bubble', () => {
@@ -33,7 +64,7 @@ test('skips injected (non-user) context', () => {
   applyEvent(
     model,
     event('user/message', {
-      source: { kind: 'plugin', plugin: 'skill' },
+      source: { kind: 'skill-invocation' },
       content: [{ type: 'text', text: 'skill content' }],
     }),
   )
@@ -45,7 +76,7 @@ test('injected ! command context (plugin pi-tui) is not a user bubble', () => {
   applyEvent(
     model,
     event('user/message', {
-      source: { kind: 'plugin', plugin: 'pi-tui' },
+      source: { kind: 'pi-tui' },
       content: [{ type: 'text', text: '$ ls\nfile.txt' }],
     }),
   )
@@ -56,22 +87,12 @@ test('injected ! command context (plugin pi-tui) is not a user bubble', () => {
 
 test('streams text and reasoning deltas into separate items, seals on message', () => {
   const model = createModel()
-  applyEvent(
-    model,
-    event(
-      'assistant/chunk',
-      { turn: 1, step: 1, chunk: { type: 'reasoning-delta', text: 'thinking' } },
-      1,
-    ),
-  )
-  applyEvent(
-    model,
-    event('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'hi ' } }, 2),
-  )
-  applyEvent(
-    model,
-    event('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'there' } }, 3),
-  )
+  applyStreamFrame(model, frame('start'))
+  applyStreamFrame(model, frame('chunk', { type: 'reasoning-delta', index: 0, text: 'thinking' }))
+  applyStreamFrame(model, frame('chunk', { type: 'text-delta', index: 1, text: 'hi ' }))
+  applyStreamFrame(model, frame('chunk', { type: 'text-delta', index: 1, text: 'there' }))
+  // Chunks that carry no reader-visible text are ignored.
+  applyStreamFrame(model, frame('chunk', { type: 'usage', usage: { inputTokens: 1 } }))
   assert.equal(model.items.length, 2)
   assert.equal(model.items[0].kind, 'reasoning')
   assert.equal(model.items[0].text, 'thinking')
@@ -123,7 +144,7 @@ test('tracks tool cards from call to settled result', () => {
         message: {
           role: 'tool',
           source: { callId: 'c1' },
-          content: [{ type: 'tool-result', content: [{ type: 'text', text: 'file.txt' }] }],
+          content: [{ type: 'text', text: 'file.txt' }],
         },
       },
       2,
@@ -148,7 +169,7 @@ test('tracks tool cards from call to settled result', () => {
       {
         turn: 1,
         step: 1,
-        message: { role: 'tool', source: { callId: 'c2' }, content: [] },
+        message: { role: 'tool', source: { callId: 'c2' }, content: [], isError: true },
         error: { name: 'SandboxError', code: 'DENIED' },
       },
       4,
@@ -275,17 +296,11 @@ test('exit_plan_mode review decisions render as neutral, not errors', () => {
         message: {
           role: 'tool',
           source: { callId: 'p1' },
+          isError: true,
           content: [
             {
-              type: 'tool-result',
-              toolCallId: 'p1',
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: 'Error: The user chose to keep planning; revise the plan and present it again.',
-                },
-              ],
+              type: 'text',
+              text: 'Error: The user chose to keep planning; revise the plan and present it again.',
             },
           ],
         },
@@ -315,14 +330,8 @@ test('plain tool errors (non-HarnessError) render as errors', () => {
         message: {
           role: 'tool',
           source: { callId: 'b1' },
-          content: [
-            {
-              type: 'tool-result',
-              toolCallId: 'b1',
-              isError: true,
-              content: [{ type: 'text', text: 'Error: command not found' }],
-            },
-          ],
+          isError: true,
+          content: [{ type: 'text', text: 'Error: command not found' }],
         },
       },
       2,
@@ -338,15 +347,8 @@ test('turn boundaries drive the working flag and fold reasoning', () => {
   assert.equal(model.working, false)
   applyEvent(model, event('turn/start', { turn: 1 }, 1))
   assert.equal(model.working, true)
-  applyEvent(
-    model,
-    event(
-      'assistant/chunk',
-      { turn: 1, step: 1, chunk: { type: 'reasoning-delta', text: 'r' } },
-      2,
-    ),
-  )
-  applyEvent(model, event('turn/end', { turn: 1, reason: 'completed' }, 3))
+  applyStreamFrame(model, frame('chunk', { type: 'reasoning-delta', index: 0, text: 'r' }))
+  applyEvent(model, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3))
   assert.equal(model.working, false)
   assert.equal(model.items[0].streaming, false)
 })
@@ -368,7 +370,7 @@ test('compact checkpoints render as notices, not bubbles', () => {
   applyEvent(
     model,
     event('user/message', {
-      source: { kind: 'plugin', plugin: 'compact' },
+      source: { kind: 'compact-checkpoint', compactionId: 'c1' },
       content: [{ type: 'text', text: 'earlier conversation summarized' }],
     }),
   )
@@ -445,7 +447,7 @@ test('tool results keep the full text for expansion', () => {
         message: {
           role: 'tool',
           source: { callId: 'c1' },
-          content: [{ type: 'tool-result', content: [{ type: 'text', text: long }] }],
+          content: [{ type: 'text', text: long }],
         },
       },
       2,
@@ -477,7 +479,7 @@ test('tracks the last plain user prompt for /retry', () => {
   applyEvent(
     model,
     event('user/message', {
-      source: { kind: 'plugin', plugin: 'compact' },
+      source: { kind: 'compact-checkpoint', compactionId: 'c1' },
       content: [{ type: 'text', text: 'summary' }],
     }),
   )
@@ -491,4 +493,108 @@ test('folds plugin-merged session/title events into the model title', () => {
   // Empty titles are ignored.
   applyEvent(model, event('session/title', { title: '' }))
   assert.equal(model.title, '评审会话')
+})
+
+test('replayed assistant messages carry reasoning before their text', () => {
+  const model = createModel()
+  applyEvent(
+    model,
+    event(
+      'assistant/message',
+      {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'reasoning', text: 'weighing options' },
+            { type: 'text', text: 'the answer' },
+          ],
+        },
+      },
+      1,
+    ),
+  )
+  assert.deepEqual(
+    model.items.map((item) => item.kind),
+    ['reasoning', 'assistant'],
+  )
+  assert.equal(model.items[0].text, 'weighing options')
+  assert.equal(model.items[0].streaming, false)
+  assert.equal(model.items[1].text, 'the answer')
+})
+
+test('a sealed attempt keeps its partial text but stops streaming', () => {
+  const model = createModel()
+  applyStreamFrame(model, frame('start'))
+  applyStreamFrame(model, frame('chunk', { type: 'text-delta', index: 0, text: 'partial' }))
+  assert.equal(model.items[0].streaming, true)
+  applyEvent(model, event('assistant/attempt', { turn: 1, step: 1, stream: [] }, 1))
+  assert.equal(model.items[0].text, 'partial')
+  assert.equal(model.items[0].streaming, false)
+  // A retried attempt paints a NEW item instead of appending to the sealed one.
+  applyStreamFrame(model, frame('start'))
+  applyStreamFrame(model, frame('chunk', { type: 'text-delta', index: 0, text: 'second try' }))
+  assert.deepEqual(
+    model.items.map((item) => item.text),
+    ['partial', 'second try'],
+  )
+})
+
+test('an end frame seals a stream that never committed a message', () => {
+  const model = createModel()
+  applyStreamFrame(model, frame('start'))
+  applyStreamFrame(model, frame('chunk', { type: 'reasoning-delta', index: 0, text: 'hmm' }))
+  applyStreamFrame(model, frame('end'))
+  assert.equal(model.items[0].kind, 'reasoning')
+  assert.equal(model.items[0].streaming, false)
+  assert.equal(model.openReasoning, undefined)
+})
+
+test('image tool results project their attachment refs onto the card', () => {
+  const model = createModel()
+  applyEvent(
+    model,
+    event('tool/call', { turn: 1, step: 1, callId: 'i1', name: 'read_image', arguments: '{}' }, 1),
+  )
+  applyEvent(
+    model,
+    event(
+      'tool/result',
+      {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'tool',
+          source: { callId: 'i1' },
+          content: [
+            { type: 'text', text: 'read ok' },
+            {
+              type: 'image',
+              attachment: {
+                attachmentId: 'att-1',
+                mediaType: 'image/png',
+                bytes: 12,
+                width: 3,
+                height: 4,
+                name: 'shot.png',
+              },
+            },
+          ],
+        },
+      },
+      2,
+    ),
+  )
+  assert.deepEqual(model.items[0].tool?.imageRefs, [
+    {
+      attachmentId: 'att-1',
+      mediaType: 'image/png',
+      bytes: 12,
+      width: 3,
+      height: 4,
+      name: 'shot.png',
+    },
+  ])
+  assert.equal(model.items[0].tool?.status, 'ok')
 })

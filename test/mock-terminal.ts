@@ -70,4 +70,8 @@ export class MockTerminal implements Terminal {
   setProgress(): void {
     // No-op.
   }
+
+  setProgramStatus(): void {
+    // No-op.
+  }
 }
