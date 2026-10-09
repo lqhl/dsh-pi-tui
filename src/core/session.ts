@@ -8,11 +8,59 @@ import { realpath } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
-import type { WorkspaceRegistryService } from './services.js'
+import type {
+  SessionPersistenceService,
+  StoredSessionHandle,
+  WorkspaceRegistryService,
+} from './services.js'
 
 export interface ResolvedAgent {
   agent: Agent
   handle?: AgentHandle
+}
+
+/** `ctx.sessionPersistence`, or undefined when durable sessions are not mounted. */
+function persistenceOf(ctx: Context): SessionPersistenceService | undefined {
+  return ctx.get('sessionPersistence') as SessionPersistenceService | undefined
+}
+
+/** Release a read handle without masking the read result with a close failure. */
+async function closeQuietly(handle: StoredSessionHandle): Promise<void> {
+  await handle.close().catch(() => {
+    // Best effort: the log this handle served is already in hand.
+  })
+}
+
+/**
+ * Open one stored session for reading. A read handle never claims write
+ * ownership, so this works on a session that is live in this process or in
+ * another one. Callers MUST close the handle.
+ */
+async function openStoredSession(
+  ctx: Context,
+  id: string,
+): Promise<StoredSessionHandle | undefined> {
+  const persistence = persistenceOf(ctx)
+  if (persistence === undefined) return undefined
+  return persistence.open(SessionId(id), 'read')
+}
+
+/**
+ * Read one stored session's contiguous event log through a `read` handle.
+ * Rejects when the stored session is missing or unreadable; the handle is
+ * always closed.
+ */
+export async function readSessionEvents(
+  ctx: Context,
+  id: string,
+): Promise<readonly SessionEvent[]> {
+  const handle = await openStoredSession(ctx, id)
+  if (handle === undefined) return []
+  try {
+    return (await handle.read()).events
+  } finally {
+    await closeQuietly(handle)
+  }
 }
 
 /** Session-creation metadata the TUI passes (cwd + optional agent preset). */
@@ -133,13 +181,12 @@ export function attachWorkspaceOnFirstEvent(
  */
 export async function reconcileWorkspaceAttachments(ctx: Context): Promise<number> {
   const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
-  const persistence = ctx.get('sessionPersistence') as
-    { list(signal?: AbortSignal): Promise<readonly SessionHeader[]> } | undefined
+  const persistence = persistenceOf(ctx)
   if (registry === undefined || persistence === undefined) return 0
   try {
-    const headers = await persistence.list()
+    const snapshots = await persistence.list()
     let repaired = 0
-    for (const header of headers) {
+    for (const { header } of snapshots) {
       if (header.cwd === undefined || header.cwd === '') continue
       let canonical: string
       try {
@@ -171,28 +218,34 @@ export async function reconcileWorkspaceAttachments(ctx: Context): Promise<numbe
   }
 }
 
+/**
+ * Event envelope for scans by event-type name. `SessionEvent`'s mapped union
+ * only covers the types THIS bundle links (dsh-session plus the packages it
+ * imports); `session/title` and `agent-preset/selected` are declared by other
+ * bundles, so those scans narrow through this structural view.
+ */
+type ScanEvent = { readonly type?: string; readonly data?: Record<string, unknown> }
+
 /** The preset a persisted session runs (last selection event, else header). */
 async function persistedPreset(ctx: Context, id: string): Promise<string | undefined> {
+  let handle: StoredSessionHandle | undefined
   try {
-    const persistence = ctx.get('sessionPersistence') as
-      | {
-          load(id: unknown): Promise<{
-            header?: { agentPreset?: string }
-            events: readonly { type?: string; data?: { agentPreset?: string } }[]
-          }>
-        }
-      | undefined
-    const loaded = await persistence?.load(SessionId(id))
-    if (loaded === undefined) return undefined
-    for (let index = loaded.events.length - 1; index >= 0; index -= 1) {
-      const event = loaded.events[index]
-      if (event.type === 'agent-preset/selected' && event.data?.agentPreset !== undefined) {
-        return event.data.agentPreset
+    handle = await openStoredSession(ctx, id)
+    if (handle === undefined) return undefined
+    const { events } = await handle.read()
+    const scanned = events as readonly ScanEvent[]
+    for (let index = scanned.length - 1; index >= 0; index -= 1) {
+      const event = scanned[index]
+      if (event?.type === 'agent-preset/selected') {
+        const preset = event.data?.agentPreset
+        if (typeof preset === 'string') return preset
       }
     }
-    return loaded.header?.agentPreset
+    return handle.header.agentPreset
   } catch {
     return undefined
+  } finally {
+    if (handle !== undefined) await closeQuietly(handle)
   }
 }
 
@@ -293,14 +346,18 @@ export async function forkSession(
   return { agent: created.agent, handle: created }
 }
 
-/** Persisted session headers, newest first (dsh's own persistence backend). */
+/**
+ * Persisted session headers, newest first (dsh's own persistence backend).
+ *
+ * `list()` observes stored sessions as `{ header, revision }` snapshots — the
+ * header supplies the id/cwd/createdAt the pickers render.
+ */
 export async function listSessions(ctx: Context): Promise<SessionHeader[]> {
-  const persistence = ctx.get('sessionPersistence') as
-    { list(signal?: AbortSignal): Promise<readonly SessionHeader[]> } | undefined
+  const persistence = persistenceOf(ctx)
   if (persistence === undefined) return []
   try {
-    const headers = await persistence.list()
-    return [...headers].sort((a, b) => b.createdAt - a.createdAt)
+    const snapshots = await persistence.list()
+    return snapshots.map((snapshot) => snapshot.header).sort((a, b) => b.createdAt - a.createdAt)
   } catch (error) {
     ctx.logger.warn(
       `pi-tui: listing persisted sessions failed: ${
@@ -318,23 +375,12 @@ export async function listSessions(ctx: Context): Promise<SessionHeader[]> {
  */
 export async function persistedTitle(ctx: Context, id: string): Promise<string | undefined> {
   try {
-    const persistence = ctx.get('sessionPersistence') as
-      | {
-          load(id: unknown): Promise<{
-            events: readonly { type?: string; data?: { title?: unknown } }[]
-          }>
-        }
-      | undefined
-    const loaded = await persistence?.load(SessionId(id))
-    if (loaded === undefined) return undefined
-    for (let index = loaded.events.length - 1; index >= 0; index -= 1) {
-      const event = loaded.events[index]
-      if (
-        event.type === 'session/title' &&
-        typeof event.data?.title === 'string' &&
-        event.data.title !== ''
-      ) {
-        return event.data.title
+    const events = (await readSessionEvents(ctx, id)) as readonly ScanEvent[]
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type === 'session/title') {
+        const title = event.data?.title
+        if (typeof title === 'string' && title !== '') return title
       }
     }
     return undefined

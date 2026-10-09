@@ -5,11 +5,16 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   forkSession,
+  listSessions,
+  persistedTitle,
+  readSessionEvents,
   reconcileWorkspaceAttachments,
   resolveAgent,
   resumeCommand,
+  sessionTitles,
   type SessionMeta,
 } from '../src/core/session.js'
 
@@ -21,6 +26,54 @@ const fakeHandle = (id: string): AgentHandle => ({
   agent: fakeAgent(id),
   dispose: async () => {},
 })
+
+/**
+ * A stored session as `ctx.sessionPersistence.list()` actually reports it
+ * since 0.2.0-rc.2: a `{ header, revision }` snapshot, NOT a bare header.
+ * Mocks that returned bare headers hid the `undefined · Invalid Date` bug.
+ */
+const snapshot = (id: string, extra: Partial<SessionHeader> = {}): { header: SessionHeader } => ({
+  header: { version: 4, id, createdAt: 1, isSeeded: false, ...extra } as SessionHeader,
+})
+
+/**
+ * Fake persistence store keyed by session id. `list()` hands out snapshots and
+ * `open(id, 'read')` a handle; `closed` records teardown.
+ */
+function fakeStore(
+  headers: readonly { header: SessionHeader }[],
+  logs: Record<string, readonly SessionEvent[]> = {},
+  closed: string[] = [],
+): {
+  list: () => Promise<readonly { header: SessionHeader }[]>
+  open: (
+    id: string,
+    access: string,
+  ) => Promise<{
+    header: SessionHeader
+    read: () => Promise<{ events: readonly SessionEvent[] }>
+    close: () => Promise<void>
+  }>
+} {
+  return {
+    list: async () => headers,
+    open: async (id, access) => {
+      assert.equal(access, 'read', 'the TUI must never claim write ownership of a stored session')
+      const found = headers.find((entry) => String(entry.header.id) === String(id))
+      if (found === undefined) throw new Error(`session "${String(id)}" not found`)
+      return {
+        header: found.header,
+        read: async () => ({ events: logs[String(id)] ?? [] }),
+        close: async () => {
+          closed.push(String(id))
+        },
+      }
+    },
+  }
+}
+
+const event = (type: string, data: unknown): SessionEvent =>
+  ({ type, seq: 0, time: 0, data }) as unknown as SessionEvent
 
 interface FakeAgents {
   get: (id: unknown) => Agent | undefined
@@ -96,9 +149,9 @@ test('resumes a persisted session with its recorded preset', async () => {
       },
     },
     {
-      sessionPersistence: {
-        load: async () => ({ header: { agentPreset: 'standard' }, events: [] }),
-      },
+      sessionPersistence: fakeStore([snapshot('resumed-1', { agentPreset: 'standard' })], {
+        'resumed-1': [event('agent-preset/selected', { agentPreset: 'standard' })],
+      }),
       agentPresets: {
         resolve: async (id?: string) => ({ id: id ?? 'default' }),
         mount: async () => {},
@@ -321,11 +374,11 @@ test('reconcileWorkspaceAttachments re-attaches missing sessions', async () => {
   try {
     const attached: string[] = []
     const headers = [
-      { id: 'aaa-1', cwd: dir, createdAt: 1 },
-      { id: 'bbb-2', cwd: dir, createdAt: 2 },
-      { id: 'ccc-3', cwd: dir, createdAt: 3 },
-      { id: 'ddd-4', cwd: '/tmp/pi-tui-other', createdAt: 4 }, // no workspace
-      { id: 'eee-5', createdAt: 5 }, // no cwd — skipped
+      snapshot('aaa-1', { cwd: dir, createdAt: 1 }),
+      snapshot('bbb-2', { cwd: dir, createdAt: 2 }),
+      snapshot('ccc-3', { cwd: dir, createdAt: 3 }),
+      snapshot('ddd-4', { cwd: '/tmp/pi-tui-other', createdAt: 4 }), // no workspace
+      snapshot('eee-5', { createdAt: 5 }), // no cwd — skipped
     ]
     // resolveByPath canonicalizes; report the canonical path like the real
     // registry does.
@@ -350,7 +403,7 @@ test('reconcileWorkspaceAttachments re-attaches missing sessions', async () => {
             throw new Error('reconcile must not create workspaces')
           },
         },
-        sessionPersistence: { list: async () => headers },
+        sessionPersistence: fakeStore(headers),
       },
     )
     const repaired = await reconcileWorkspaceAttachments(ctx)
@@ -364,8 +417,8 @@ test('reconcileWorkspaceAttachments re-attaches missing sessions', async () => {
 test('reconcileWorkspaceAttachments skips unresolvable cwds and unknown workspaces', async () => {
   const attached: string[] = []
   const headers = [
-    { id: 'fff-1', cwd: '/no/such/dir/anywhere', createdAt: 1 }, // does not resolve
-    { id: 'ggg-2', cwd: '/tmp/unowned-workspace', createdAt: 2 }, // no workspace
+    snapshot('fff-1', { cwd: '/no/such/dir/anywhere', createdAt: 1 }), // does not resolve
+    snapshot('ggg-2', { cwd: '/tmp/unowned-workspace', createdAt: 2 }), // no workspace
   ]
   const ctx = makeCtx(
     {
@@ -380,7 +433,7 @@ test('reconcileWorkspaceAttachments skips unresolvable cwds and unknown workspac
           throw new Error('reconcile must not create workspaces')
         },
       },
-      sessionPersistence: { list: async () => headers },
+      sessionPersistence: fakeStore(headers),
     },
   )
   const repaired = await reconcileWorkspaceAttachments(ctx)
@@ -398,4 +451,124 @@ test('reconcileWorkspaceAttachments is a no-op without the services', async () =
     {},
   )
   assert.equal(await reconcileWorkspaceAttachments(ctx), 0)
+})
+
+// ── stored-session reads (`/resume` picker, Ctrl+R search, titles) ──────────
+
+test('listSessions unwraps list() snapshots into real headers, newest first', async () => {
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => undefined as never,
+      create: async () => undefined as never,
+    },
+    {
+      sessionPersistence: fakeStore([
+        snapshot('older', { createdAt: 10, cwd: '/tmp/a' }),
+        snapshot('newer', { createdAt: 30, cwd: '/tmp/b' }),
+        snapshot('middle', { createdAt: 20 }),
+      ]),
+    },
+  )
+  const headers = await listSessions(ctx)
+  assert.deepEqual(
+    headers.map((header) => String(header.id)),
+    ['newer', 'middle', 'older'],
+    'headers carry the id the picker resumes with',
+  )
+  assert.deepEqual(
+    headers.map((header) => header.createdAt),
+    [30, 20, 10],
+    'createdAt is the header field, never undefined (which renders Invalid Date)',
+  )
+  assert.equal(headers[0]?.cwd, '/tmp/b')
+})
+
+test('listSessions survives a failing store', async () => {
+  const warns: string[] = []
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => undefined as never,
+      create: async () => undefined as never,
+    },
+    {
+      sessionPersistence: {
+        list: async () => {
+          throw new Error('store unavailable')
+        },
+      },
+    },
+    (msg) => warns.push(msg),
+  )
+  assert.deepEqual(await listSessions(ctx), [])
+  assert.match(warns[0] ?? '', /store unavailable/)
+})
+
+test('persistedTitle reads the log through a read handle and closes it', async () => {
+  const closed: string[] = []
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => undefined as never,
+      create: async () => undefined as never,
+    },
+    {
+      sessionPersistence: fakeStore(
+        [snapshot('titled-1')],
+        {
+          'titled-1': [
+            event('session/title', { title: 'first title' }),
+            event('user/message', {}),
+            event('session/title', { title: 'latest title' }),
+          ],
+        },
+        closed,
+      ),
+    },
+  )
+  assert.equal(await persistedTitle(ctx, 'titled-1'), 'latest title')
+  assert.deepEqual(closed, ['titled-1'], 'the read handle is released')
+})
+
+test('readSessionEvents returns the log and rejects an unreadable session', async () => {
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => undefined as never,
+      create: async () => undefined as never,
+    },
+    {
+      sessionPersistence: fakeStore([snapshot('known-1')], {
+        'known-1': [event('user/message', { text: 'hi' })],
+      }),
+    },
+  )
+  assert.equal((await readSessionEvents(ctx, 'known-1')).length, 1)
+  await assert.rejects(() => readSessionEvents(ctx, 'missing-1'))
+})
+
+test('sessionTitles keys titles by session id and releases every handle', async () => {
+  const closed: string[] = []
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => undefined as never,
+      create: async () => undefined as never,
+    },
+    {
+      sessionPersistence: fakeStore(
+        [snapshot('titled-1'), snapshot('plain-2')],
+        {
+          'titled-1': [event('session/title', { title: 'Titled' })],
+          'plain-2': [event('user/message', {})],
+        },
+        closed,
+      ),
+    },
+  )
+  const headers = await listSessions(ctx)
+  const titles = await sessionTitles(ctx, headers)
+  assert.deepEqual([...titles.entries()], [['titled-1', 'Titled']])
+  assert.deepEqual(closed.sort(), ['plain-2', 'titled-1'], 'both handles are released')
 })

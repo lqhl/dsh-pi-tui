@@ -78,6 +78,7 @@ import { listAllModels, pickModel, type LlmRuntimeLike, type ModelRoute } from '
 import {
   forkSession,
   listSessions,
+  readSessionEvents,
   resolveAgent,
   resumeCommand,
   sessionTitles,
@@ -737,7 +738,9 @@ export class ChatScreen {
       this.pushNotice('jobs service unavailable', 'error')
       return
     }
-    const snapshots = jobs.list(this.agent)
+    // `list` matches the caller against `job.owner.id`, so the session id is
+    // the caller — an Agent object would hide every owned job.
+    const snapshots = jobs.list(this.agent.session.id)
     if (snapshots.length === 0) {
       this.pushNotice('no background jobs')
       return
@@ -1652,7 +1655,7 @@ export class ChatScreen {
   private countRunningJobs(): number | undefined {
     try {
       const jobs = this.ctx.get('jobs') as JobsService | undefined
-      const snapshots = jobs?.list(this.agent)
+      const snapshots = jobs?.list(this.agent.session.id)
       if (snapshots === undefined) return undefined
       const running = snapshots.filter((job) => job.status === 'running').length
       return running > 0 ? running : undefined
@@ -1961,24 +1964,14 @@ export class ChatScreen {
   private async pastPrompts(): Promise<
     { index: number; sessionId: string; cwd: string; text: string }[]
   > {
-    const persistence = this.ctx.get('sessionPersistence') as
-      | {
-          list(
-            signal?: AbortSignal,
-          ): Promise<readonly { id: string; cwd?: string; createdAt: number }[]>
-          load(id: unknown): Promise<{ events: readonly SessionEvent[] }>
-        }
-      | undefined
-    if (persistence === undefined) return []
     try {
-      const headers = [...(await persistence.list())]
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .slice(0, 15)
+      const headers = (await listSessions(this.ctx)).slice(0, 15)
       const results: { index: number; sessionId: string; cwd: string; text: string }[] = []
       for (const header of headers) {
-        if (String(header.id) === this.currentSessionId) continue
+        const id = String(header.id)
+        if (id === this.currentSessionId) continue
         try {
-          const { events } = await persistence.load(header.id)
+          const events = await readSessionEvents(this.ctx, id)
           const first = events.find(
             (event) =>
               event.type === 'user/message' &&
@@ -1989,7 +1982,7 @@ export class ChatScreen {
             if (text !== '') {
               results.push({
                 index: results.length,
-                sessionId: String(header.id),
+                sessionId: id,
                 cwd: basename(header.cwd ?? '') || 'session',
                 text,
               })

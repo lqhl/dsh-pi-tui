@@ -3,19 +3,65 @@
  * `ctx.get(...)`. Centralized so a shape drift in a dsh rc upgrade is fixed
  * in one place instead of scattered inline `as` casts.
  */
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 
 export interface SessionProjectionsService {
   snapshot(session: unknown): { values: Record<string, unknown> }
 }
 
+/**
+ * One stored-session observation from `ctx.sessionPersistence` (`list`/`stat`).
+ * Since 0.2.0-rc.2 the backend pairs the validated {@link SessionHeader} with
+ * an opaque `revision` (plus optional `eventCount`/`sizeBytes`) instead of
+ * returning bare headers — reading `snapshot.id`/`snapshot.createdAt` is the
+ * drift that rendered every persisted session as `undefined · Invalid Date`.
+ */
+export interface StoredSessionSnapshot {
+  readonly header: SessionHeader
+}
+
+/**
+ * Read side of one stored session opened through
+ * {@link SessionPersistenceService.open}: `header` is the validated stored
+ * header, `read()` yields the contiguous event log, and `close()` releases the
+ * handle (always, even after a failed read).
+ */
+export interface StoredSessionHandle {
+  readonly header: SessionHeader
+  read(offset?: number, length?: number): Promise<{ readonly events: readonly SessionEvent[] }>
+  close(): Promise<void>
+}
+
+/**
+ * Minimal `ctx.sessionPersistence` surface this plugin consumes. Opening is
+ * the only way to read a persisted log — 0.2.0-rc.2 dropped the old
+ * header-plus-log `load()` in favour of `open(id, access)` handles.
+ */
+export interface SessionPersistenceService {
+  list(options?: { signal?: AbortSignal }): Promise<readonly StoredSessionSnapshot[]>
+  open(
+    id: SessionId,
+    access: 'read' | 'write',
+    options?: { signal?: AbortSignal },
+  ): Promise<StoredSessionHandle>
+}
+
+/**
+ * Minimal `ctx.jobs` (`@deepseek-ai/dsh-jobs`) surface. `list` takes a
+ * {@link SessionId} caller: the implementation keeps a job visible when it is
+ * unowned or owned by exactly that session id, so passing an Agent object
+ * silently hides the session's own jobs from `/jobs` and the status bar.
+ */
+export interface JobView {
+  readonly id: string
+  readonly kind: string
+  readonly label: string
+  readonly status: string
+  readonly owner?: SessionId
+}
+
 export interface JobsService {
-  list(caller?: unknown): readonly {
-    id: string
-    kind: string
-    label: string
-    status: string
-  }[]
+  list(caller?: SessionId): readonly JobView[]
 }
 
 export interface AgentDefaultModelService {
