@@ -72,6 +72,7 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 - slash 命令：`/compact` `/goal` `/plan` `/feedback` 等全部来自官方 `ctx.commands` 注册表（自动补全 + 动态发现）
 - 权限审批弹窗（`approval/request`）与用户问答瀑布（`user-questions/request`；选项/多选/自由文本；plan-review 特化决策条，PgUp/PgDn 滚动 transcript 里的完整 plan）
 - 会话管理：创建、恢复、fork、子代理树、选择器（官方持久化后端；resume 选择器显示官方自动标题，没有任何对话的会话标注为 `(empty session)`）。**恢复失败会明确报错**——比如目标会话仍被另一个 dsh 进程占用——而不是静默新建一个空会话，让人以为历史丢了
+- **惰性建会话**：启动、`/new`、`!cmd` 都不会真的创建会话——状态栏显示 `new session`，直到你第一次提问才落盘。所以「打开看一下就退出」不会在 store 里留下任何东西，也不会污染 resume 选择器
 - 会话短 id：状态栏、选择器、提示里统一显示可辨识的 8 位（store 自造的 `session-<uuid>` 会跳过常量前缀，不再显示成一排 `session-`）
 - 转录搜索：`Ctrl+F` 在 transcript 内搜索并跳转（输入即定位 + 高亮，↑/↓ 循环）；`/retry` 一键重发失败 turn；`/copy` 复制 assistant/工具结果/错误/id/resume 命令（OSC 52 三路剪贴板）
 - 长会话折叠：消息超过阈值自动折叠旧消息（`/expand-all` 展开）

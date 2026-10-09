@@ -39,6 +39,7 @@ CI 对每个 PR 跑同样四步；pre-commit hook（husky + lint-staged）在提
 - 纯逻辑放 `src/core/`（可单测、无终端依赖）；渲染放 `src/ui/`。新逻辑尽量配 `test/` 单测。
 - **降级路径必须显式告知用户。** 恢复会话失败就退回新建会话、读不到日志就当作空——这类静默降级让人以为「我的历史丢了」，比直接报错糟糕得多。降到一条降级路径时，把失败原因带到可见的地方（transcript notice / 状态栏），并让调用方能区分「成功」和「凑合成功」（见 `ResolvedAgent.resumeFailure`）。
 - 会话 id 的短显示一律走 `src/core/ids.ts` 的 `shortSessionId`：store 自造的 id 形如 `session-<uuid>`，直接 `slice(0, 8)` 会渲染成一排没有信息量的 `session-`。
+- **会话惰性创建。** 官方 agent factory 一发布就会 flush 掉新会话的 policy 事件，所以「先建好再说」必然留下空会话记录。`ChatScreen.agent` 因此是可选的：启动不带 `--resume` 时停在 pending 状态（状态栏 `new session`），由 `ensureAgent()` 在第一次真正需要会话的动作里创建。任何"顺手先建一个"的改动都会把这个 bug 带回来——`/new` 也走 pending，`!cmd` 的输出先缓冲、等会话出现再注入。
 
 ## 依赖升级
 

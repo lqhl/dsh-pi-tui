@@ -103,11 +103,18 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
     sessionId = await pickSession(tui, headers, summaries)
   }
 
-  const resolved = await resolveAgent(ctx, sessionId, agentOptions, meta)
-  const agent = resolved.agent
+  // A session the user asked for (id or picker) must be live before the first
+  // frame. A plain launch creates NOTHING: the harness flushes a created
+  // session's policy events immediately, so an eagerly created "new" session
+  // would leave an empty record behind even when the user never types. The
+  // screen instead materializes the first session on demand.
+  const resolved =
+    sessionId !== undefined ? await resolveAgent(ctx, sessionId, agentOptions, meta) : undefined
+  const agent = resolved?.agent
   // Keep the handle so the initial agent is disposed on the first in-session
-  // switch (new/fork/resume) — dropping it leaked its scoped context.
-  let current: ResolvedAgent = resolved
+  // switch (new/fork/resume, or `/new` going back to pending) — dropping it
+  // leaked its scoped context.
+  let current: ResolvedAgent | undefined = resolved
 
   // ── human-interaction seams (wired after the screen: the plan-review bar
   // borrows the transcript viewport for PgUp/PgDn) ───────────────────────────
@@ -116,6 +123,7 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
     ctx,
     tui,
     agent,
+    createAgent: (options, sessionMeta) => resolveAgent(ctx, undefined, options, sessionMeta),
     config: {
       provider: effectiveProvider,
       model: effectiveModel,
@@ -125,10 +133,10 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
     onQuit: (hint) => {
       disposeRootAndExit(ctx, 0, hint)
     },
-    onAgentSwitch: (next: ResolvedAgent) => {
+    onAgentSwitch: (next: ResolvedAgent | undefined) => {
       const old = current
       current = next
-      if (old.handle !== undefined && old.agent !== next.agent) {
+      if (old?.handle !== undefined && old.agent !== next?.agent) {
         void old.handle.dispose().catch(() => {
           // The registry teardown still covers a failed dispose.
         })
@@ -164,15 +172,18 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   })
 
   // Replay the durable log first so the transcript paints on the first
-  // frame; only then subscribe, so no event is folded twice.
-  for (const event of agent.session.snapshotEvents()) {
-    screen.handleEvent(event)
-  }
-  // A requested session that could not be resumed silently became this fresh
-  // one, which is indistinguishable from "the session had no history" — say
-  // so, loudly, before anything else the user reads.
-  if (resolved.resumeFailure !== undefined) {
-    screen.reportResumeFailure(resolved.resumeFailure)
+  // frame; only then subscribe, so no event is folded twice. A pending screen
+  // has nothing to replay.
+  if (agent !== undefined) {
+    for (const event of agent.session.snapshotEvents()) {
+      screen.handleEvent(event)
+    }
+    // A requested session that could not be resumed silently became a fresh
+    // one, which is indistinguishable from "the session had no history" — say
+    // so, loudly, before anything else the user reads.
+    if (resolved?.resumeFailure !== undefined) {
+      screen.reportResumeFailure(resolved.resumeFailure)
+    }
   }
   // ↑/↓ history: seed the editor from the replayed session transcript.
   screen.seedHistory()

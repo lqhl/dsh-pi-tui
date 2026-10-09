@@ -22,7 +22,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, relative } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import type { Agent, AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions, AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { createUserMessage, ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { isUserInvocable, type SkillSummary } from '@deepseek-ai/dsh-skill'
@@ -83,6 +83,7 @@ import {
   resumeCommand,
   sessionSummaries,
   type ResolvedAgent,
+  type SessionMeta,
 } from '../core/session.js'
 import { shortSessionId } from '../core/ids.js'
 import { pickFromListWithSearch, openFindOverlay } from './overlays.js'
@@ -92,7 +93,21 @@ import type { TranscriptSearchMatch } from '../core/search.js'
 export interface ChatScreenOptions {
   ctx: Context
   tui: ViewportTUI
-  agent: Agent
+  /**
+   * The live agent to render. Absent when the app booted WITHOUT a session to
+   * resume: the harness materializes a created session the moment the agent
+   * factory publishes it (its policy events are flushed immediately), so an
+   * eagerly created "new" session leaves an empty record behind even when the
+   * user never types anything. Instead the screen starts in a *pending* state
+   * and materializes the first session on the first action that needs one.
+   */
+  agent?: Agent
+  /**
+   * Materialize the first session on demand — required whenever `agent` is
+   * absent. Receives the route/meta the screen holds at that moment, so a model
+   * chosen before the first prompt is the one the session starts with.
+   */
+  createAgent?: (options: AgentOptions, meta: SessionMeta) => Promise<ResolvedAgent>
   config: {
     provider?: string
     model?: string
@@ -100,8 +115,12 @@ export interface ChatScreenOptions {
     preset?: string
   }
   onQuit: (resumeHint?: string) => void
-  /** Called after a successful in-session agent switch (new/fork/resume). */
-  onAgentSwitch?: (resolved: ResolvedAgent) => void
+  /**
+   * Called after an in-session agent switch (new/fork/resume) or a reset back
+   * to the pending state (`undefined`), which is when `/new` gives up its live
+   * agent so nothing is stored until the next prompt.
+   */
+  onAgentSwitch?: (resolved: ResolvedAgent | undefined) => void
 }
 
 interface LlmRuntime extends LlmRuntimeLike {
@@ -120,10 +139,25 @@ interface LlmRuntime extends LlmRuntimeLike {
 export class ChatScreen {
   private readonly ctx: Context
   private readonly tui: ViewportTUI
-  private agent: Agent
+  /**
+   * The live agent, or undefined while the first session is still pending (see
+   * {@link ChatScreenOptions.agent}). Every dereference either runs only after
+   * materialization or calls {@link ensureAgent} first.
+   */
+  private agent: Agent | undefined
+  private readonly createAgent:
+    ((options: AgentOptions, meta: SessionMeta) => Promise<ResolvedAgent>) | undefined
+  /** In-flight first-session creation, so parallel actions share one agent. */
+  private creating: Promise<Agent | undefined> | undefined
+  /**
+   * Shell output produced by `!cmd` before the first session exists. The
+   * output belongs in the model context of the session the next prompt starts,
+   * but running a shell command must not be what creates that session.
+   */
+  private readonly pendingInjections: string[] = []
   private readonly config: ChatScreenOptions['config']
   private readonly commands: CommandRuntime | undefined
-  private readonly onAgentSwitch: ((resolved: ResolvedAgent) => void) | undefined
+  private readonly onAgentSwitch: ((resolved: ResolvedAgent | undefined) => void) | undefined
   private model: ChatModel = createModel()
   private readonly messages = new Container()
   private readonly statusBar = new StatusBar()
@@ -161,12 +195,15 @@ export class ChatScreen {
     this.ctx = options.ctx
     this.tui = options.tui
     this.agent = options.agent
+    this.createAgent = options.createAgent
     this.config = options.config
     this.commands = this.ctx.get('commands')
     this.onAgentSwitch = options.onAgentSwitch
 
     this.seedSelection()
-    this.disposeSelection = installModelSelection(this.agent.ctx, this.selection)
+    if (this.agent !== undefined) {
+      this.disposeSelection = installModelSelection(this.agent.ctx, this.selection)
+    }
 
     this.editor = new Editor(this.tui, editorTheme, { paddingX: 1 })
     this.editor.onSubmit = (text) => {
@@ -338,26 +375,59 @@ export class ChatScreen {
     // second stdin data listener and duplicate every keystroke.
   }
 
+  /**
+   * Materialize the first session on demand (see
+   * {@link ChatScreenOptions.createAgent}). A no-op once an agent is live, and
+   * concurrent callers share one creation. Returns undefined when the screen
+   * has no factory or creation failed — the failure is already reported.
+   */
+  private async ensureAgent(): Promise<Agent | undefined> {
+    if (this.agent !== undefined) return this.agent
+    if (this.createAgent === undefined) return undefined
+    if (this.creating !== undefined) return this.creating
+    this.creating = (async (): Promise<Agent | undefined> => {
+      try {
+        const resolved = await this.createAgent?.(this.sessionOptions(), this.sessionMeta())
+        if (resolved === undefined) return undefined
+        this.switchAgent(resolved.agent, { keepTranscript: true })
+        this.onAgentSwitch?.(resolved)
+        if (resolved.resumeFailure !== undefined) this.reportResumeFailure(resolved.resumeFailure)
+        // Shell output collected before the session existed belongs to it.
+        for (const text of this.pendingInjections.splice(0)) this.injectShellContext(text)
+        return this.agent
+      } catch (error) {
+        this.pushNotice(
+          `could not start a session: ${error instanceof Error ? error.message : String(error)}`,
+          'error',
+        )
+        return undefined
+      } finally {
+        this.creating = undefined
+      }
+    })()
+    return this.creating
+  }
+
   private isWorking(): boolean {
-    return this.model.working || this.agent.status === 'running'
+    return this.model.working || this.agent?.status === 'running'
   }
 
   private interrupt(): void {
-    this.agent.cancel({ kind: 'user' }, { keepInbox: true })
+    this.agent?.cancel({ kind: 'user' }, { keepInbox: true })
   }
 
   private isBusy(): boolean {
     return this.isWorking() || this.bashRunning
   }
 
-  /** The session id the screen currently renders. */
+  /** The session id the screen currently renders ('' while pending). */
   get currentSessionId(): string {
-    return String(this.agent.session.id)
+    return this.agent === undefined ? '' : String(this.agent.session.id)
   }
 
   /** Copy-pasteable resume hint, or undefined when the session has no durable events. */
   private resumeHint(): string | undefined {
-    if (this.agent.session.seq === 0) return undefined
+    if (this.agent === undefined || this.agent.session.seq === 0) return undefined
     return `resume: ${resumeCommand(this.currentSessionId)}`
   }
 
@@ -365,14 +435,16 @@ export class ChatScreen {
    * The live session's working directory, from its durable header. Anchors
    * `!`/`@`/exports so they match the tools' cwd even after a resume from
    * another directory (resume cannot carry a fresh cwd — the session keeps
-   * the one it was created in).
+   * the one it was created in). A pending session uses the configured cwd.
    */
   private get cwd(): string {
-    return this.agent.session.header.cwd ?? this.config.cwd ?? process.cwd()
+    return this.agent?.session.header.cwd ?? this.config.cwd ?? process.cwd()
   }
 
   ownsSession(id: unknown): boolean {
-    return id === this.agent.session.id || String(id) === String(this.agent.session.id)
+    if (this.agent === undefined) return false
+    const own = String(this.agent.session.id)
+    return id === this.agent.session.id || String(id) === own
   }
 
   /**
@@ -398,9 +470,9 @@ export class ChatScreen {
    */
   private seedSelection(): void {
     this.selection.current = seedModelSelection({
-      header: this.agent.session.requestHeader()?.config,
+      header: this.agent?.session.requestHeader()?.config,
       config: this.config,
-      agentOptions: this.agent.options,
+      agentOptions: this.agent?.options,
       defaults: this.defaultSelection(),
       prior: this.selection.current,
     })
@@ -414,36 +486,45 @@ export class ChatScreen {
   }
 
   /**
-   * Rebind the screen to another live agent (new/fork/resume): tear down the
-   * old per-agent selection install, reset the transcript, reinstall and
-   * reseed the selection, replay the durable log, and repaint.
+   * Rebind the screen to another live agent (new/fork/resume), or back to the
+   * pending state with `undefined` (`/new`): tear down the old per-agent
+   * selection install, reset the transcript, reinstall and reseed the
+   * selection, replay the durable log, and repaint.
    */
-  switchAgent(next: Agent): void {
+  switchAgent(next: Agent | undefined, options: { keepTranscript?: boolean } = {}): void {
     if (next === this.agent) return
     if (this.isBusy()) {
       this.pushNotice('cannot switch sessions while work is running (Esc to interrupt)', 'error')
       return
     }
     this.disposeSelection?.()
+    this.disposeSelection = undefined
     this.agent = next
-    this.model = createModel()
-    this.views.clear()
-    this.messages.clear()
-    // Per-session UI state does not survive a switch.
-    this.lastFoldKey = ''
-    this.searchQuery = undefined
-    this.focusedToolId = undefined
-    this.expandedToolId = undefined
-    this.expandedAll = false
-    this.showBanner()
+    // Going pending -> first live session keeps what the user already saw
+    // (banner, `!cmd` output, local notices): nothing of it belonged to a
+    // stored session, and a session switch between two live logs still clears.
+    if (options.keepTranscript !== true) {
+      this.model = createModel()
+      this.views.clear()
+      this.messages.clear()
+      // Per-session UI state does not survive a switch.
+      this.lastFoldKey = ''
+      this.searchQuery = undefined
+      this.focusedToolId = undefined
+      this.expandedToolId = undefined
+      this.expandedAll = false
+      this.showBanner()
+    }
     if (this.workingLoader !== undefined) {
       this.workingLoader.stop()
       this.workingLoader = undefined
     }
     this.seedSelection()
-    this.disposeSelection = installModelSelection(this.agent.ctx, this.selection)
-    for (const event of next.session.snapshotEvents()) {
-      this.handleEvent(event)
+    if (next !== undefined) {
+      this.disposeSelection = installModelSelection(next.ctx, this.selection)
+      for (const event of next.session.snapshotEvents()) {
+        this.handleEvent(event)
+      }
     }
     this.seedHistory()
     this.rebuildAutocomplete()
@@ -488,10 +569,12 @@ export class ChatScreen {
    */
   private rebuildAutocomplete(): void {
     const slashCommands: SlashCommand[] = [
-      ...(this.commands?.list(this.agent) ?? []).map((descriptor) => ({
-        name: descriptor.name,
-        description: descriptor.description,
-      })),
+      ...(this.agent !== undefined ? (this.commands?.list(this.agent) ?? []) : []).map(
+        (descriptor) => ({
+          name: descriptor.name,
+          description: descriptor.description,
+        }),
+      ),
       { name: 'new', description: 'Start a fresh session' },
       { name: 'fork', description: 'Fork this session at its current end' },
       { name: 'resume', description: 'List sessions / reopen one' },
@@ -558,38 +641,34 @@ export class ChatScreen {
     }
   }
 
-  private async cmdNew(): Promise<void> {
+  /**
+   * `/new` drops the live agent and returns to the pending state, so the next
+   * prompt opens a fresh session — and a `/new` the user never follows up
+   * leaves nothing stored. The previous session is untouched (its id is
+   * reported so it stays resumable).
+   */
+  private cmdNew(): void {
     if (this.isBusy()) {
       this.pushNotice('cannot switch sessions while work is running (Esc to interrupt)', 'error')
       return
     }
     const previousId = this.currentSessionId
-    const previousHasContent = this.agent.session.seq > 0
-    try {
-      const resolved = await resolveAgent(
-        this.ctx,
-        undefined,
-        this.sessionOptions(),
-        this.sessionMeta(),
-      )
-      this.commitSwitch(resolved)
-      this.pushNotice(
-        `new session ${shortSessionId(this.currentSessionId)} · ${resumeCommand(this.currentSessionId)}`,
-      )
-      if (previousHasContent) {
-        this.pushNotice(`previous ${shortSessionId(previousId)} · ${resumeCommand(previousId)}`)
-      }
-    } catch (error) {
-      this.pushNotice(
-        `/new failed: ${error instanceof Error ? error.message : String(error)}`,
-        'error',
-      )
+    const previousHasContent = (this.agent?.session.seq ?? 0) > 0
+    this.switchAgent(undefined)
+    this.onAgentSwitch?.(undefined)
+    this.pushNotice('new session — the next prompt starts it')
+    if (previousHasContent) {
+      this.pushNotice(`previous ${shortSessionId(previousId)} · ${resumeCommand(previousId)}`)
     }
   }
 
   private async cmdFork(): Promise<void> {
     if (this.isBusy()) {
       this.pushNotice('cannot fork while work is running (Esc to interrupt)', 'error')
+      return
+    }
+    if (this.agent === undefined) {
+      this.pushNotice('nothing to fork yet — send a prompt first', 'error')
       return
     }
     try {
@@ -703,7 +782,9 @@ export class ChatScreen {
       this.pushNotice('subagent service unavailable', 'error')
       return
     }
-    const nodes = await subs.listDescendants(this.agent.session.id).catch(() => [])
+    const agent = await this.ensureAgent()
+    if (agent === undefined) return
+    const nodes = await subs.listDescendants(agent.session.id).catch(() => [])
     if (nodes.length === 0) {
       this.pushNotice('no subagent sessions under this root')
       return
@@ -742,7 +823,9 @@ export class ChatScreen {
       this.pushNotice('subagent service unavailable', 'error')
       return
     }
-    const nodes = await subs.listChildren(this.agent.session.id).catch(() => [])
+    const agent = await this.ensureAgent()
+    if (agent === undefined) return
+    const nodes = await subs.listChildren(agent.session.id).catch(() => [])
     if (nodes.length === 0) {
       this.pushNotice('no live subagents')
       return
@@ -763,9 +846,11 @@ export class ChatScreen {
       this.pushNotice('jobs service unavailable', 'error')
       return
     }
+    const agent = await this.ensureAgent()
+    if (agent === undefined) return
     // `list` matches the caller against `job.owner.id`, so the session id is
     // the caller — an Agent object would hide every owned job.
-    const snapshots = jobs.list(this.agent.session.id)
+    const snapshots = jobs.list(agent.session.id)
     if (snapshots.length === 0) {
       this.pushNotice('no background jobs')
       return
@@ -797,11 +882,25 @@ export class ChatScreen {
       void this.dispatchSlash(trimmed)
       return
     }
-    this.followup(trimmed)
+    void this.followup(trimmed)
   }
 
-  private followup(text: string): void {
-    this.agent.followup(
+  /**
+   * Feed `!cmd` output to the model without waking the driver. The `pi-tui`
+   * producer kind (declared in core/model.ts) is not `user`, so the fold does
+   * not render this injected context as a second user bubble — the notice card
+   * is the visible record; this only feeds the model.
+   */
+  private injectShellContext(text: string): void {
+    this.agent?.inject(
+      createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'pi-tui' } }),
+    )
+  }
+
+  private async followup(text: string): Promise<void> {
+    const agent = await this.ensureAgent()
+    if (agent === undefined) return
+    agent.followup(
       createUserMessage({
         content: [{ type: 'text', text }],
         source: { kind: 'user' },
@@ -813,7 +912,7 @@ export class ChatScreen {
   private async dispatchSlash(line: string): Promise<void> {
     const parsed = parseSlash(line)
     if (parsed === undefined) {
-      this.followup(line)
+      void this.followup(line)
       return
     }
     if (parsed.name === 'model') return this.cmdModel(parsed.raw.trim())
@@ -838,7 +937,7 @@ export class ChatScreen {
     // dsh-tool-skill pre-step gesture picks it up. Don't swallow it.
     const skills = await this.listSkills()
     if (skills.some((skill) => skill.name === parsed.name)) {
-      this.followup(line)
+      void this.followup(line)
       return
     }
     this.pushNotice(`unknown command: ${line}`, 'error')
@@ -852,10 +951,12 @@ export class ChatScreen {
    */
   private async executeCommand(line: string): Promise<boolean> {
     if (this.commands === undefined) return false
+    const agent = await this.ensureAgent()
+    if (agent === undefined) return false
     const controller = new AbortController()
     this.slashAbort = controller
     try {
-      const execution = await this.commands.execute(this.agent, line, [], controller.signal)
+      const execution = await this.commands.execute(agent, line, [], controller.signal)
       if (execution !== undefined) {
         const result = execution.result
         if (result.kind === 'success') this.pushNotice(result.text ?? line)
@@ -885,6 +986,7 @@ export class ChatScreen {
   }
 
   private currentRoute(): ModelRoute {
+    const defaults = this.defaultSelection()
     const current = this.selection.current
     if (current !== undefined && current.provider !== undefined && current.model !== undefined) {
       return { provider: current.provider, model: current.model }
@@ -893,8 +995,13 @@ export class ChatScreen {
       return { provider: this.model.route.provider, model: this.model.route.model }
     }
     return {
-      provider: this.config.provider ?? this.agent.options.provider ?? 'deepseek-official',
-      model: this.config.model ?? this.agent.options.model ?? 'deepseek-v4-flash',
+      provider:
+        this.config.provider ??
+        this.agent?.options.provider ??
+        defaults?.provider ??
+        'deepseek-official',
+      model:
+        this.config.model ?? this.agent?.options.model ?? defaults?.model ?? 'deepseek-v4-flash',
     }
   }
 
@@ -1018,6 +1125,7 @@ export class ChatScreen {
     try {
       const projections = this.ctx.get('sessionProjections') as
         SessionProjectionsService | undefined
+      if (this.agent === undefined) return false
       const plan = projections?.snapshot(this.agent.session).values?.plan as
         { active?: boolean; wanted?: boolean | null } | undefined
       return plan?.active === true || plan?.wanted === true
@@ -1115,8 +1223,13 @@ export class ChatScreen {
       this.pushNotice('session title service unavailable', 'error')
       return
     }
+    const agent = this.agent
+    if (agent === undefined) {
+      this.pushNotice('nothing to rename yet — send a prompt first', 'error')
+      return
+    }
     try {
-      service.rename(this.agent.session, title)
+      service.rename(agent.session, title)
       this.model.title = title
       this.sync()
       this.pushNotice(`session renamed: ${title}`)
@@ -1298,7 +1411,7 @@ export class ChatScreen {
         this.copyToClipboard(this.currentSessionId, 'session id')
         return
       case 'resume': {
-        if (this.agent.session.seq === 0) {
+        if (this.agent === undefined || this.agent.session.seq === 0) {
           this.pushNotice('session has no durable content yet', 'error')
           return
         }
@@ -1323,7 +1436,7 @@ export class ChatScreen {
       this.pushNotice('still working — press Esc to interrupt first', 'error')
       return
     }
-    this.followup(text)
+    void this.followup(text)
     this.pushNotice('retrying last prompt')
   }
 
@@ -1491,17 +1604,11 @@ export class ChatScreen {
       }
       if (!excluded) {
         // Join the model context without waking the driver (pi's
-        // recordBashResult equivalent).
-        this.agent.inject(
-          createUserMessage({
-            content: [{ type: 'text', text: `$ ${command}${output === '' ? '' : `\n${output}`}` }],
-            // This plugin's own producer kind (declared in core/model.ts),
-            // not `user`, so the fold does not render this injected context
-            // as a second user bubble — the notice card above is the visible
-            // record; this only feeds the model.
-            source: { kind: 'pi-tui' },
-          }),
-        )
+        // recordBashResult equivalent). With no session yet the text is held
+        // for the session the next prompt starts.
+        const text = `$ ${command}${output === '' ? '' : `\n${output}`}`
+        if (this.agent === undefined) this.pendingInjections.push(text)
+        else this.injectShellContext(text)
       }
     } catch (error) {
       card.notice = 'error'
@@ -1680,7 +1787,7 @@ export class ChatScreen {
   private countRunningJobs(): number | undefined {
     try {
       const jobs = this.ctx.get('jobs') as JobsService | undefined
-      const snapshots = jobs?.list(this.agent.session.id)
+      const snapshots = this.agent === undefined ? undefined : jobs?.list(this.agent.session.id)
       if (snapshots === undefined) return undefined
       const running = snapshots.filter((job) => job.status === 'running').length
       return running > 0 ? running : undefined
@@ -1852,7 +1959,8 @@ export class ChatScreen {
     try {
       const projections = this.ctx.get('sessionProjections') as
         SessionProjectionsService | undefined
-      const values = projections?.snapshot(this.agent.session).values
+      const values =
+        this.agent === undefined ? undefined : projections?.snapshot(this.agent.session).values
       const projection = collectProjection(values, this.model.tokens)
       tokens = projection.tokens
       todos = projection.todos
@@ -1871,7 +1979,10 @@ export class ChatScreen {
       try {
         const policy = this.ctx.get('sandboxPolicy') as
           { resolve(request?: { session?: unknown }): { mode: string } } | undefined
-        sandboxMode = policy?.resolve({ session: this.agent.session }).mode
+        sandboxMode =
+          this.agent === undefined
+            ? undefined
+            : policy?.resolve({ session: this.agent.session }).mode
       } catch {
         // Optional service.
       }
@@ -1886,7 +1997,7 @@ export class ChatScreen {
     const effort = this.currentEffort()
     const status: StatusBarData = {
       model: effort !== undefined ? `${route.model}·${effort}` : route.model,
-      sessionId: String(this.agent.session.id),
+      sessionId: this.currentSessionId,
       cwd: basename(this.cwd),
       git: this.gitState,
       tokens,

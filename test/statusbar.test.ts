@@ -97,3 +97,17 @@ test('status bar omits the git segment when absent', async () => {
   const output = stripAnsi(bar.render(terminal.width)[0])
   assert.ok(!output.includes('git:'))
 })
+
+test('status bar marks a session that has not been created yet', async () => {
+  const terminal = new MockTerminal()
+  terminal.width = 200
+  const bar = new StatusBar()
+  // The TUI starts in a pending state and stores nothing until the first
+  // prompt, so there is no session id to show.
+  bar.update({ model: 'deepseek-v4-flash', sessionId: '', cwd: 'repo' })
+  const output = stripAnsi(bar.render(terminal.width)[0])
+  assert.ok(output.includes('new session'), output)
+  // No stray empty segment between the mode and the cwd.
+  assert.ok(!/·\s+·/.test(output), output)
+  assert.ok(visibleWidth(bar.render(terminal.width)[0]) <= terminal.width)
+})

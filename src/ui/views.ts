@@ -376,7 +376,11 @@ export class StatusBar implements Component {
     const modeShort = sandboxShort(data.sandboxMode)
     if (modeShort !== undefined) parts.push(modeShort)
     if (data.goalPhase !== undefined) parts.push(`◈${data.goalPhase}`)
-    if (data.sessionId !== undefined) parts.push(shortSessionId(data.sessionId))
+    // No id yet means no session exists: the TUI is waiting for the first
+    // prompt to create one, so say that instead of an empty segment.
+    if (data.sessionId !== undefined) {
+      parts.push(data.sessionId === '' ? 'new session' : shortSessionId(data.sessionId))
+    }
     if (data.cwd !== undefined) parts.push(data.cwd)
     if (data.git !== undefined) {
       parts.push(gitLabel(data.git.branch, data.git.dirty))
