@@ -45,8 +45,19 @@ CI 对每个 PR 跑同样四步；pre-commit hook（husky + lint-staged）在提
 `dsh` 加载插件时会校验 `peerDependencies`，不匹配会直接跳过整个 bundle。
 
 升级后**类型检查通过并不等于能跑**：`ctx.get(...)` 取到的服务面是手写 cast，服务方法改名/改形状
-（例如 `userQuestions.registerProvider` → `user-questions/request` 瀑布、`shell.start/run` →
-`shell.resolve/execute`）只会在运行时炸。改完依赖务必跑一次真实运行冒烟测试：
+只会体现在运行时。已知踩过的坑：
+
+- `userQuestions.registerProvider` → `user-questions/request` 瀑布
+- `shell.start()`/`run()` → `resolve()` + `execute()` 句柄
+- `sessionPersistence.list()` 由「裸 `SessionHeader[]`」变成「`{ header, revision, … }` 快照」，
+  且 `load()` 被 `open(id, 'read')` 句柄取代（漏改会让每个会话渲染成 `undefined · NaN-NaN-NaN`）
+- `jobs.list(caller)` 的 `caller` 是 `SessionId`（实现按 `job.owner.id === caller` 过滤），
+  传 Agent 对象会静默丢掉本会话的 job
+
+所以改完依赖必须同时做两件事：
+
+1. **把每个 `ctx.get(...)` 的 cast 对着 `node_modules/` 里的 `.d.ts` 逐个核一遍方法名、参数与返回形状。**
+2. 跑一次真实运行冒烟测试：
 
 ```sh
 npm run build
@@ -61,7 +72,11 @@ DSH_HOME=$PWD/.smoke-home script -qec "dsh --profile pi-tui" /dev/null   # 交�
 ```
 
 最小可接受覆盖：启动 banner、一次流式回答、一次工具调用、`/resume` 重放、`/model` 与 `@` 选择器、
-`!` shell 注入、plan 模式的 plan-review 决策条。冒烟目录用完即删，不要提交。
+`!` shell 注入、plan 模式的 plan-review 决策条。
+
+**「没报错」不等于「对」**：选择器、状态栏这类读模型要在冒烟里读它的**内容**（有没有
+`undefined`/`NaN`/空列表），只确认弹层出现过会漏掉整类服务形状漂移——`/resume` 选择器就是这样
+带着 0.5.0 发出去的。冒烟目录用完即删，不要提交。
 
 ## 注意
 
