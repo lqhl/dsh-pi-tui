@@ -81,9 +81,10 @@ import {
   readSessionEvents,
   resolveAgent,
   resumeCommand,
-  sessionTitles,
+  sessionSummaries,
   type ResolvedAgent,
 } from '../core/session.js'
+import { shortSessionId } from '../core/ids.js'
 import { pickFromListWithSearch, openFindOverlay } from './overlays.js'
 import { buildBanner } from './banner.js'
 import type { TranscriptSearchMatch } from '../core/search.js'
@@ -573,10 +574,10 @@ export class ChatScreen {
       )
       this.commitSwitch(resolved)
       this.pushNotice(
-        `new session ${this.currentSessionId.slice(0, 8)} · ${resumeCommand(this.currentSessionId)}`,
+        `new session ${shortSessionId(this.currentSessionId)} · ${resumeCommand(this.currentSessionId)}`,
       )
       if (previousHasContent) {
-        this.pushNotice(`previous ${previousId.slice(0, 8)} · ${resumeCommand(previousId)}`)
+        this.pushNotice(`previous ${shortSessionId(previousId)} · ${resumeCommand(previousId)}`)
       }
     } catch (error) {
       this.pushNotice(
@@ -600,7 +601,7 @@ export class ChatScreen {
       )
       this.commitSwitch(resolved)
       this.pushNotice(
-        `forked → ${this.currentSessionId.slice(0, 8)} (history kept, lineage recorded) · ${resumeCommand(this.currentSessionId)}`,
+        `forked → ${shortSessionId(this.currentSessionId)} (history kept, lineage recorded) · ${resumeCommand(this.currentSessionId)}`,
       )
     } catch (error) {
       this.pushNotice(
@@ -622,18 +623,22 @@ export class ChatScreen {
         this.pushNotice('no persisted sessions')
         return
       }
-      const titles = await sessionTitles(this.ctx, headers)
+      const summaries = await sessionSummaries(this.ctx, headers)
       target =
         (await pickFromListWithSearch(this.tui, {
           title: 'Resume session',
           items: headers.map((header) => {
             const id = String(header.id)
-            const title = titles.get(id)
+            const summary = summaries.get(id)
+            const title = summary?.title
+            const empty = summary !== undefined && !summary.hasContent
+            const short = shortSessionId(id)
+            const where = basename(header.cwd ?? '') || `session ${short}`
             return {
               value: id,
-              label: title ?? (basename(header.cwd ?? '') || `session ${id.slice(0, 8)}`),
-              description: `${id.slice(0, 8)} · ${new Date(header.createdAt).toLocaleString()}${
-                title !== undefined && header.cwd !== undefined ? ` · ${basename(header.cwd)}` : ''
+              label: title ?? (empty ? '(empty session)' : where),
+              description: `${short} · ${new Date(header.createdAt).toLocaleString()} · ${where}${
+                empty ? ' · resumes empty' : ''
               }`,
             }
           }),
@@ -648,13 +653,33 @@ export class ChatScreen {
         this.sessionMeta(),
       )
       this.commitSwitch(resolved)
-      this.pushNotice(`resumed ${this.currentSessionId.slice(0, 8)}`)
+      if (resolved.resumeFailure !== undefined) {
+        this.reportResumeFailure(resolved.resumeFailure)
+      } else {
+        this.pushNotice(`resumed ${shortSessionId(this.currentSessionId)}`)
+      }
     } catch (error) {
       this.pushNotice(
         `/resume failed: ${error instanceof Error ? error.message : String(error)}`,
         'error',
       )
     }
+  }
+
+  /**
+   * Tell the user that an explicitly requested session could not be resumed and
+   * a fresh one took its place. Without this the fallback is invisible and the
+   * empty transcript reads as "my history is gone".
+   */
+  reportResumeFailure(failure: { requestedId: string; reason: string }): void {
+    const short = shortSessionId(failure.requestedId)
+    const alreadyOwned = /own|lock|in use/i.test(failure.reason) || failure.reason.includes('owned')
+    this.pushNotice(
+      `could not resume ${short}: ${failure.reason}\nstarted a new session ${shortSessionId(
+        this.currentSessionId,
+      )} instead.${alreadyOwned ? ' The requested session is still open in another dsh process — close it there and retry.' : ''}`,
+      'error',
+    )
   }
 
   private async cmdTree(): Promise<void> {
@@ -1066,7 +1091,7 @@ export class ChatScreen {
       }
     }
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-    const path = `${this.cwd}/dsh-pi-tui-export-${stamp}-${this.currentSessionId.slice(0, 8)}.md`
+    const path = `${this.cwd}/dsh-pi-tui-export-${stamp}-${shortSessionId(this.currentSessionId)}.md`
     try {
       const target = await fs.resolve(path)
       await fs.writeText(target, lines.join('\n'))
@@ -1926,7 +1951,7 @@ export class ChatScreen {
       ...past.map((prompt) => ({
         value: `past:${prompt.index}`,
         label: `⏱ ${prompt.cwd} · ${prompt.text.replace(/\s+/g, ' ').slice(0, 70)}`,
-        description: `past session ${prompt.sessionId.slice(0, 8)}`,
+        description: `past session ${shortSessionId(prompt.sessionId)}`,
       })),
     ]
     if (items.length === 0) {

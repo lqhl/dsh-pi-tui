@@ -9,11 +9,13 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   forkSession,
   listSessions,
+  persistedSummary,
   persistedTitle,
   readSessionEvents,
   reconcileWorkspaceAttachments,
   resolveAgent,
   resumeCommand,
+  sessionSummaries,
   sessionTitles,
   type SessionMeta,
 } from '../src/core/session.js'
@@ -571,4 +573,124 @@ test('sessionTitles keys titles by session id and releases every handle', async 
   const titles = await sessionTitles(ctx, headers)
   assert.deepEqual([...titles.entries()], [['titled-1', 'Titled']])
   assert.deepEqual(closed.sort(), ['plain-2', 'titled-1'], 'both handles are released')
+})
+
+// ── a failed resume must be reported, never silently replaced ───────────────
+
+test('resolveAgent reports a failed resume instead of quietly creating a session', async () => {
+  const warns: string[] = []
+  const created = fakeHandle('fresh-1')
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => {
+        throw new Error('session "wanted-1" is already owned by another process')
+      },
+      create: async () => created,
+    },
+    { sessionPersistence: fakeStore([snapshot('wanted-1')]) },
+    (msg) => warns.push(msg),
+  )
+  const resolved = await resolveAgent(ctx, 'wanted-1', OPTIONS, META)
+  assert.equal(resolved.agent, created.agent, 'the TUI still starts on a fresh session')
+  assert.deepEqual(resolved.resumeFailure, {
+    requestedId: 'wanted-1',
+    reason: 'session "wanted-1" is already owned by another process',
+  })
+  assert.match(warns[0] ?? '', /wanted-1/)
+})
+
+test('a successful resume carries no resumeFailure', async () => {
+  const resumed = fakeHandle('resumed-2')
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => resumed,
+      create: async () => {
+        throw new Error('create should not run')
+      },
+    },
+    { sessionPersistence: fakeStore([snapshot('resumed-2')]) },
+  )
+  const resolved = await resolveAgent(ctx, 'resumed-2', OPTIONS, META)
+  assert.equal(resolved.agent, resumed.agent)
+  assert.equal(resolved.resumeFailure, undefined)
+})
+
+test('a fresh session (no requested id) carries no resumeFailure', async () => {
+  const created = fakeHandle('fresh-2')
+  const ctx = makeCtx({
+    get: () => undefined,
+    resume: async () => {
+      throw new Error('resume should not run')
+    },
+    create: async () => created,
+  })
+  const resolved = await resolveAgent(ctx, undefined, OPTIONS, META)
+  assert.equal(resolved.resumeFailure, undefined)
+})
+
+// ── pickers must tell an empty stored session from a real one ───────────────
+
+test('sessionSummaries flags sessions that hold no conversation', async () => {
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => undefined as never,
+      create: async () => undefined as never,
+    },
+    {
+      sessionPersistence: fakeStore(
+        [snapshot('boot-1'), snapshot('real-2'), snapshot('titled-3')],
+        {
+          // What the TUI leaves behind when someone quits without prompting.
+          'boot-1': [
+            event('permission/preset', { preset: 'workspace-write' }),
+            event('sandbox/mode', { mode: 'workspace-write' }),
+            event('approval/policy', { policy: 'ask' }),
+          ],
+          // Injected context alone is still not a conversation.
+          'real-2': [event('user/message', { source: { kind: 'agent-instructions' } })],
+          'titled-3': [
+            event('user/message', {
+              source: { kind: 'user' },
+              content: [{ type: 'text', text: 'hi' }],
+            }),
+            event('assistant/message', {}),
+            event('session/title', { title: 'Greeting' }),
+          ],
+        },
+      ),
+    },
+  )
+  const summaries = await sessionSummaries(ctx, await listSessions(ctx))
+  assert.deepEqual(summaries.get('boot-1'), { hasContent: false })
+  assert.deepEqual(summaries.get('real-2'), { hasContent: false })
+  assert.deepEqual(summaries.get('titled-3'), { hasContent: true, title: 'Greeting' })
+})
+
+test('an unreadable log is not reported as an empty session', async () => {
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => undefined as never,
+      create: async () => undefined as never,
+    },
+    // `list()` knows a session the store can no longer open: a vanished log
+    // must not be labelled "empty", which would invite a pointless resume.
+    { sessionPersistence: fakeStore([snapshot('other-1')]) },
+  )
+  assert.deepEqual(await persistedSummary(ctx, 'gone-1'), { hasContent: true })
+})
+
+test('a readable but event-less session is reported as empty', async () => {
+  const ctx = makeCtx(
+    {
+      get: () => undefined,
+      resume: async () => undefined as never,
+      create: async () => undefined as never,
+    },
+    { sessionPersistence: fakeStore([snapshot('blank-1')], { 'blank-1': [] }) },
+  )
+  assert.deepEqual(await persistedSummary(ctx, 'blank-1'), { hasContent: false })
 })

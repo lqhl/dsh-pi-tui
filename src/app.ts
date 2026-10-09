@@ -15,7 +15,7 @@ import {
   listSessions,
   reconcileWorkspaceAttachments,
   resolveAgent,
-  sessionTitles,
+  sessionSummaries,
   type ResolvedAgent,
 } from './core/session.js'
 import { AgentDefaultModelService } from './core/services.js'
@@ -99,8 +99,8 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   let sessionId = args.resumeId ?? sessionConfig
   if (sessionId === undefined && args.pickSession) {
     const headers = await listSessions(ctx)
-    const titles = await sessionTitles(ctx, headers)
-    sessionId = await pickSession(tui, headers, titles)
+    const summaries = await sessionSummaries(ctx, headers)
+    sessionId = await pickSession(tui, headers, summaries)
   }
 
   const resolved = await resolveAgent(ctx, sessionId, agentOptions, meta)
@@ -167,6 +167,12 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   // frame; only then subscribe, so no event is folded twice.
   for (const event of agent.session.snapshotEvents()) {
     screen.handleEvent(event)
+  }
+  // A requested session that could not be resumed silently became this fresh
+  // one, which is indistinguishable from "the session had no history" — say
+  // so, loudly, before anything else the user reads.
+  if (resolved.resumeFailure !== undefined) {
+    screen.reportResumeFailure(resolved.resumeFailure)
   }
   // ↑/↓ history: seed the editor from the replayed session transcript.
   screen.seedHistory()

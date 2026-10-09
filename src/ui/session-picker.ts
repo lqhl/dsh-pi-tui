@@ -11,7 +11,12 @@
 import { basename } from 'node:path'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { Container, SelectList, Text, type TUI } from '@earendil-works/pi-tui'
+import type { SessionSummary } from '../core/session.js'
+import { shortSessionId } from '../core/ids.js'
 import { selectListTheme, style } from './theme.js'
+
+/** Label for a stored session that holds no conversation at all. */
+const EMPTY_LABEL = '(empty session)'
 
 class SessionPicker extends Container {
   private readonly list: SelectList
@@ -45,19 +50,23 @@ function formatTime(epochMs: number): string {
 export function pickSession(
   tui: TUI,
   headers: readonly SessionHeader[],
-  titles?: ReadonlyMap<string, string>,
+  summaries?: ReadonlyMap<string, SessionSummary>,
 ): Promise<string | undefined> {
   return new Promise((resolve) => {
     const items = [
       { value: '', label: '＋ New session', description: 'start fresh' },
       ...headers.map((header) => {
         const id = String(header.id)
-        const title = titles?.get(id)
+        const summary = summaries?.get(id)
+        const title = summary?.title
+        const empty = summary !== undefined && !summary.hasContent
+        const short = shortSessionId(id)
+        const where = basename(header.cwd ?? '') || `session ${short}`
         return {
           value: id,
-          label: title ?? (basename(header.cwd ?? '') || `session ${id.slice(0, 8)}`),
-          description: `${id.slice(0, 8)} · ${formatTime(header.createdAt)}${
-            title !== undefined ? ` · ${basename(header.cwd ?? '') || 'no cwd'}` : ''
+          label: title ?? (empty ? EMPTY_LABEL : where),
+          description: `${short} · ${formatTime(header.createdAt)} · ${where}${
+            empty ? ' · resumes empty' : ''
           }`,
         }
       }),

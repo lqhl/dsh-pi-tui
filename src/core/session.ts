@@ -17,6 +17,14 @@ import type {
 export interface ResolvedAgent {
   agent: Agent
   handle?: AgentHandle
+  /**
+   * Set when an explicitly requested session could NOT be resumed and a brand
+   * new session took its place instead. Resuming fails when the stored session
+   * is gone, unreadable, or still write-owned by another live process — and a
+   * silent fallback is indistinguishable from "the session had no history",
+   * which is exactly how it was reported. Callers MUST surface this.
+   */
+  resumeFailure?: { requestedId: string; reason: string }
 }
 
 /** `ctx.sessionPersistence`, or undefined when durable sessions are not mounted. */
@@ -255,6 +263,7 @@ export async function resolveAgent(
   agentOptions: AgentOptions,
   meta: SessionMeta,
 ): Promise<ResolvedAgent> {
+  let resumeFailure: ResolvedAgent['resumeFailure']
   if (requestedSessionId !== undefined) {
     const resumeId = SessionId(requestedSessionId)
     const existing = ctx.agents.get(resumeId)
@@ -272,11 +281,9 @@ export async function resolveAgent(
       })
       return { agent: resumed.agent, handle: resumed }
     } catch (error) {
-      ctx.logger.warn(
-        `pi-tui: resume of "${requestedSessionId}" failed, starting fresh: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      )
+      const reason = error instanceof Error ? error.message : String(error)
+      ctx.logger.warn(`pi-tui: resume of "${requestedSessionId}" failed, starting fresh: ${reason}`)
+      resumeFailure = { requestedId: requestedSessionId, reason }
     }
   }
   const composition = await composeSetup(ctx, meta.agentPreset)
@@ -303,7 +310,11 @@ export async function resolveAgent(
   // must never be reported as an agent-create failure, and an empty session
   // (never any event) should leave no workspace record behind.
   attachWorkspaceOnFirstEvent(ctx, sessionId, meta.cwd)
-  return { agent: created.agent, handle: created }
+  return {
+    agent: created.agent,
+    handle: created,
+    ...(resumeFailure !== undefined ? { resumeFailure } : {}),
+  }
 }
 
 /**
@@ -369,30 +380,83 @@ export async function listSessions(ctx: Context): Promise<SessionHeader[]> {
 }
 
 /**
+ * What a picker needs to know about one stored session, folded from a single
+ * read of its log: its latest title, and whether it holds any conversation at
+ * all. `hasContent` matters because a session the harness created but nobody
+ * ever prompted (the TUI makes one on every boot) resumes to an empty
+ * transcript, which is indistinguishable from a broken resume.
+ */
+export interface SessionSummary {
+  title?: string
+  hasContent: boolean
+}
+
+/** Fold one persisted log into its {@link SessionSummary}. */
+function summarize(events: readonly ScanEvent[]): SessionSummary {
+  let title: string | undefined
+  let hasContent = false
+  for (const event of events) {
+    if (event?.type === 'session/title') {
+      const value = event.data?.title
+      if (typeof value === 'string' && value !== '') title = value
+    } else if (event?.type === 'assistant/message') {
+      hasContent = true
+    } else if (event?.type === 'user/message') {
+      // Only a direct human prompt counts; injected context (agent
+      // instructions, runtime snapshots, goal/skill bodies) does not make a
+      // session look like it has a conversation.
+      const source = event.data?.source as { kind?: unknown } | undefined
+      if (source?.kind === 'user') hasContent = true
+    }
+  }
+  return title !== undefined ? { title, hasContent } : { hasContent }
+}
+
+/**
+ * Summary for one persisted session. Reading the whole log is I/O, so callers
+ * bound how many sessions they ask about (see {@link sessionSummaries}).
+ */
+export async function persistedSummary(ctx: Context, id: string): Promise<SessionSummary> {
+  try {
+    const events = (await readSessionEvents(ctx, id)) as readonly ScanEvent[]
+    return summarize(events)
+  } catch {
+    // An unreadable log is not an empty one; claim content so the picker does
+    // not mislabel it as resumable-but-empty.
+    return { hasContent: true }
+  }
+}
+
+/**
  * Last `session/title` value in a persisted session's log, or undefined.
  * Mirrors `persistedPreset`'s bounded scan; the picker shows titles instead
  * of bare `basename(cwd)` labels.
  */
 export async function persistedTitle(ctx: Context, id: string): Promise<string | undefined> {
-  try {
-    const events = (await readSessionEvents(ctx, id)) as readonly ScanEvent[]
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index]
-      if (event?.type === 'session/title') {
-        const title = event.data?.title
-        if (typeof title === 'string' && title !== '') return title
-      }
-    }
-    return undefined
-  } catch {
-    return undefined
+  return (await persistedSummary(ctx, id)).title
+}
+
+/**
+ * Summaries for the newest `limit` headers, keyed by session id. Loading full
+ * logs is I/O, so callers bound it — boot/resume pickers pass the
+ * already-sorted, already-capped header list.
+ */
+export async function sessionSummaries(
+  ctx: Context,
+  headers: readonly SessionHeader[],
+  limit = 15,
+): Promise<Map<string, SessionSummary>> {
+  const summaries = new Map<string, SessionSummary>()
+  for (const header of headers.slice(0, limit)) {
+    const id = String(header.id)
+    summaries.set(id, await persistedSummary(ctx, id))
   }
+  return summaries
 }
 
 /**
  * Titles for the newest `limit` headers, keyed by session id (sessions with
- * no title are absent). Loading full logs is I/O, so callers bound it —
- * boot/resume pickers pass the already-sorted, already-capped header list.
+ * no title are absent).
  */
 export async function sessionTitles(
   ctx: Context,
@@ -400,10 +464,8 @@ export async function sessionTitles(
   limit = 15,
 ): Promise<Map<string, string>> {
   const titles = new Map<string, string>()
-  for (const header of headers.slice(0, limit)) {
-    const id = String(header.id)
-    const title = await persistedTitle(ctx, id)
-    if (title !== undefined) titles.set(id, title)
+  for (const [id, summary] of await sessionSummaries(ctx, headers, limit)) {
+    if (summary.title !== undefined) titles.set(id, summary.title)
   }
   return titles
 }

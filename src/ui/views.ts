@@ -16,6 +16,7 @@ import {
   type Component,
 } from '@earendil-works/pi-tui'
 import type { ChatItem } from '../core/model.js'
+import { shortSessionId } from '../core/ids.js'
 import { markdownTheme, reasoningMarkdownTheme, style } from './theme.js'
 import {
   gitLabel,
@@ -375,7 +376,7 @@ export class StatusBar implements Component {
     const modeShort = sandboxShort(data.sandboxMode)
     if (modeShort !== undefined) parts.push(modeShort)
     if (data.goalPhase !== undefined) parts.push(`◈${data.goalPhase}`)
-    if (data.sessionId !== undefined) parts.push(data.sessionId.slice(0, 8))
+    if (data.sessionId !== undefined) parts.push(shortSessionId(data.sessionId))
     if (data.cwd !== undefined) parts.push(data.cwd)
     if (data.git !== undefined) {
       parts.push(gitLabel(data.git.branch, data.git.dirty))
