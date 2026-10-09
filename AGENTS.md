@@ -37,6 +37,8 @@ CI 对每个 PR 跑同样四步；pre-commit hook（husky + lint-staged）在提
 - ESLint 用 `recommendedTypeChecked`（type-aware）。fire-and-forget 的 Promise 必须用 `void` 前缀（`void this.cmdXxx()`），禁止静默丢弃。
 - 类型安全：`tsconfig` 开了 `strict`。优先复用 `@deepseek-ai/dsh-*` 的导出类型；跨文件的服务面类型集中在 `src/core/services.ts`。
 - 纯逻辑放 `src/core/`（可单测、无终端依赖）；渲染放 `src/ui/`。新逻辑尽量配 `test/` 单测。
+- **降级路径必须显式告知用户。** 恢复会话失败就退回新建会话、读不到日志就当作空——这类静默降级让人以为「我的历史丢了」，比直接报错糟糕得多。降到一条降级路径时，把失败原因带到可见的地方（transcript notice / 状态栏），并让调用方能区分「成功」和「凑合成功」（见 `ResolvedAgent.resumeFailure`）。
+- 会话 id 的短显示一律走 `src/core/ids.ts` 的 `shortSessionId`：store 自造的 id 形如 `session-<uuid>`，直接 `slice(0, 8)` 会渲染成一排没有信息量的 `session-`。
 
 ## 依赖升级
 
