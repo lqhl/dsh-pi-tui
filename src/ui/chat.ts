@@ -21,8 +21,12 @@ import { tmpdir } from 'node:os'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, relative } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { installModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import type { Agent, AgentOptions, AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
+import type {
+  Agent,
+  AgentOptions,
+  AssistantStreamFrame,
+  ModelSelection,
+} from '@deepseek-ai/dsh-agent'
 import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { createUserMessage, ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { isUserInvocable, type SkillSummary } from '@deepseek-ai/dsh-skill'
@@ -162,9 +166,7 @@ export class ChatScreen {
   private readonly messages = new Container()
   private readonly statusBar = new StatusBar()
   private readonly editor: Editor
-  /** One-per-agent mutable model selection (grok/web pattern; install once per agent). */
-  private readonly selection: ModelSelectionRef = { current: undefined, assembled: undefined }
-  private disposeSelection: (() => void) | undefined
+  private pendingSelection: ModelSelection | undefined
   private exitArm: ExitArm = { lastPressAt: 0 }
   private workingLoader: Loader | undefined
   private readonly views = new Map<number, ReturnType<typeof createView>>()
@@ -199,11 +201,6 @@ export class ChatScreen {
     this.config = options.config
     this.commands = this.ctx.get('commands')
     this.onAgentSwitch = options.onAgentSwitch
-
-    this.seedSelection()
-    if (this.agent !== undefined) {
-      this.disposeSelection = installModelSelection(this.agent.ctx, this.selection)
-    }
 
     this.editor = new Editor(this.tui, editorTheme, { paddingX: 1 })
     this.editor.onSubmit = (text) => {
@@ -463,42 +460,47 @@ export class ChatScreen {
     this.tui.requestRender()
   }
 
-  /**
-   * Seed the model selection so every step has a route, including RESUMED
-   * agents (whose creation never saw our agentOptions): the persisted
-   * request header wins, then the row config, then the harness defaults.
-   */
-  private seedSelection(): void {
-    this.selection.current = seedModelSelection({
-      header: this.agent?.session.requestHeader()?.config,
-      config: this.config,
-      agentOptions: this.agent?.options,
-      defaults: this.defaultSelection(),
-      prior: this.selection.current,
-    })
+  private currentSelection(): ModelSelection {
+    return (
+      this.agent?.model.current() ??
+      this.pendingSelection ??
+      seedModelSelection({
+        config: this.config,
+        agentOptions: this.agent?.options,
+        defaults: this.defaultSelection(),
+      })
+    )
+  }
+
+  private selectModel(selection: ModelSelection): void {
+    if (this.agent === undefined) {
+      this.pendingSelection = selection
+    } else {
+      this.agent.model.select(selection)
+    }
   }
 
   /** The harness's shared default-model selection (same source as app.ts). */
-  private defaultSelection():
-    { provider?: string; model?: string; reasoningEffort?: string } | undefined {
+  private defaultSelection(): ModelSelection | undefined {
     const service = this.ctx.get('agentDefaultModel') as AgentDefaultModelService | undefined
     return service?.currentSelection()
   }
 
-  /**
-   * Rebind the screen to another live agent (new/fork/resume), or back to the
-   * pending state with `undefined` (`/new`): tear down the old per-agent
-   * selection install, reset the transcript, reinstall and reseed the
-   * selection, replay the durable log, and repaint.
-   */
+  /** Switch the agent, replay its transcript, and repaint. */
   switchAgent(next: Agent | undefined, options: { keepTranscript?: boolean } = {}): void {
     if (next === this.agent) return
     if (this.isBusy()) {
       this.pushNotice('cannot switch sessions while work is running (Esc to interrupt)', 'error')
       return
     }
-    this.disposeSelection?.()
-    this.disposeSelection = undefined
+    this.pendingSelection =
+      next === undefined
+        ? seedModelSelection({
+            config: this.config,
+            defaults: this.defaultSelection(),
+            prior: this.currentSelection(),
+          })
+        : undefined
     this.agent = next
     // Going pending -> first live session keeps what the user already saw
     // (banner, `!cmd` output, local notices): nothing of it belonged to a
@@ -519,9 +521,7 @@ export class ChatScreen {
       this.workingLoader.stop()
       this.workingLoader = undefined
     }
-    this.seedSelection()
     if (next !== undefined) {
-      this.disposeSelection = installModelSelection(next.ctx, this.selection)
       for (const event of next.session.snapshotEvents()) {
         this.handleEvent(event)
       }
@@ -626,12 +626,8 @@ export class ChatScreen {
 
   // ── session management commands ────────────────────────────────────────────
 
-  private sessionOptions() {
-    const route = this.currentRoute()
-    return {
-      provider: route.provider,
-      model: route.model,
-    }
+  private sessionOptions(): AgentOptions {
+    return this.currentSelection()
   }
 
   private sessionMeta() {
@@ -986,27 +982,12 @@ export class ChatScreen {
   }
 
   private currentRoute(): ModelRoute {
-    const defaults = this.defaultSelection()
-    const current = this.selection.current
-    if (current !== undefined && current.provider !== undefined && current.model !== undefined) {
-      return { provider: current.provider, model: current.model }
-    }
-    if (this.model.route?.provider !== undefined && this.model.route?.model !== undefined) {
-      return { provider: this.model.route.provider, model: this.model.route.model }
-    }
-    return {
-      provider:
-        this.config.provider ??
-        this.agent?.options.provider ??
-        defaults?.provider ??
-        'deepseek-official',
-      model:
-        this.config.model ?? this.agent?.options.model ?? defaults?.model ?? 'deepseek-v4-flash',
-    }
+    const { provider, model } = this.currentSelection()
+    return { provider, model }
   }
 
   private currentEffort(): string | undefined {
-    return this.selection.current?.reasoningEffort ?? this.model.effort
+    return this.currentSelection().reasoningEffort ?? this.model.effort
   }
 
   private async cmdModel(query: string): Promise<void> {
@@ -1036,19 +1017,16 @@ export class ChatScreen {
       const resolved = await llm.resolveCallConfig({ provider: route.provider, model: route.model })
       // Preserve the selected reasoning effort across a model switch; the
       // adapter re-resolves it for the new model on the next request.
-      this.selection.current = {
+      const { reasoningEffort } = this.currentSelection()
+      const selection: ModelSelection = {
         provider: resolved.provider,
         model: resolved.model,
-        ...(this.selection.current?.reasoningEffort !== undefined
-          ? { reasoningEffort: this.selection.current.reasoningEffort }
-          : {}),
+        ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       }
-      // Write the shared default too (grok rationale: the web host's outer
-      // waterfall fallback chain reads it, so a stale selection can't
-      // overwrite this one).
+      this.selectModel(selection)
       try {
         const defaults = this.ctx.get('agentDefaultModel') as AgentDefaultModelService | undefined
-        await defaults?.saveSelection(this.selection.current)
+        await defaults?.saveSelection(selection)
       } catch {
         // Best effort; session selection already applied.
       }
@@ -1079,16 +1057,9 @@ export class ChatScreen {
       return
     }
     try {
-      await llm.resolveCallConfig({
-        provider: route.provider,
-        model: route.model,
-        reasoningEffort: ReasoningEffortId(effort),
-      })
-      this.selection.current = {
-        provider: route.provider,
-        model: route.model,
-        reasoningEffort: ReasoningEffortId(effort),
-      }
+      const selection = { ...route, reasoningEffort: ReasoningEffortId(effort) }
+      await llm.resolveCallConfig(selection)
+      this.selectModel(selection)
       this.pushNotice(`thinking → ${effort} · from the next step`)
       this.sync()
     } catch (error) {

@@ -10,13 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 
 export const name = 'pi-tui'
-// `workspaceRegistry` is a web-only service that this bundle's
-// cordis.patch.yml adds to the tree (see its workspace/storage rows).
-// Injecting it guarantees the service both exists AND has finished its init
-// before `apply`, so the TUI's per-creation attach runs against a ready
-// registry. The hard dependency is safe only because the plugin ships as a
-// bundle with that patch — a bare plugin row without those rows would fail
-// activation waiting for this service.
+// Wait for the bundle's workspace registry before attaching sessions by cwd.
 export const inject = ['agents', 'cmdlineArgs', 'workspaceRegistry']
 
 /** dsh-pi-tui plugin configuration (row config in cordis.patch.yml). */

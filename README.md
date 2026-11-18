@@ -62,7 +62,7 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 | `/hotkeys`                             | 显示键位表                                                          |
 | `/compact` `/goal` `/plan` `/feedback` | 官方 dsh 命令（自动发现）                                           |
 
-模型/思考强度切换通过官方 `installModelSelection` 链路（与 web/grok 客户端同款），无需 fork 会话；会话与 web profile 共享 `~/.dsh/sessions` 持久化存储。
+模型和思考强度由 DSH 写入当前会话，恢复会话时会恢复当前选择。会话与 web profile 共享 `~/.dsh/sessions` 持久化存储。
 
 ## 功能
 
@@ -83,12 +83,12 @@ dsh --profile pi-tui --preset                 # 从 preset 列表中选择
 
 ## 支持矩阵
 
-| dsh                     | pi-tui | node                    | 状态             |
-| ----------------------- | ------ | ----------------------- | ---------------- |
-| 0.2.0-rc.2（当前 next） | ^1.1.0 | >= 22.19（CI 跑 22/24） | ✅ 端到端验证    |
-| 其他 rc                 | —      | —                       | 未验证，欢迎反馈 |
+| dsh        | pi-tui | node                    | 状态             |
+| ---------- | ------ | ----------------------- | ---------------- |
+| 0.2.2-rc.1 | ^1.1.0 | >= 22.19（CI 跑 22/24） | ✅ 端到端验证    |
+| 其他 rc    | —      | —                       | 未验证，欢迎反馈 |
 
-`dsh` 在加载插件时会校验 `peerDependencies`；本版本只声明并验证 0.2.0-rc.2。
+`dsh-pi-tui` 使用宿主提供的核心包。DSH 在加载插件时会检查 `peerDependencies` 声明的宿主版本。
 
 发布：npm 上的每次发版由 GitHub Actions 经 [npm Trusted Publishers](https://docs.npmjs.com/trusted-publishers)（OIDC）发布，带 provenance 签名——打 `v*` tag 即发布，无任何 token。
 

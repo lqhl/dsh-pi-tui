@@ -10,6 +10,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { TuiAltScreen, type ViewportTUI } from '@earendil-works/pi-tui'
 import { parseArgs, USAGE } from './args.js'
+import { seedModelSelection } from './core/selection.js'
 import {
   listPresets,
   listSessions,
@@ -50,12 +51,6 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   const provider = clean(config.provider)
   const model = clean(config.model)
 
-  // Provider/model route: explicit row config wins; otherwise inherit the
-  // harness's default-model selection (settings.yaml), matching the web app.
-  const agentDefaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelService | undefined
-  const defaultSelection = agentDefaultModel?.currentSelection()
-  const effectiveProvider = provider ?? defaultSelection?.provider
-  const effectiveModel = model ?? defaultSelection?.model
   if (args.help) {
     console.log(USAGE)
     disposeRootAndExit(ctx, 0)
@@ -72,7 +67,11 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
   const tui: ViewportTUI = new TuiAltScreen(terminal)
   tui.start()
 
-  const agentOptions = { provider: effectiveProvider, model: effectiveModel }
+  const agentDefaultModel = ctx.get('agentDefaultModel') as AgentDefaultModelService | undefined
+  const agentOptions = seedModelSelection({
+    config: { provider, model },
+    defaults: agentDefaultModel?.currentSelection(),
+  })
 
   // Preset picker when `--preset` is given without an id.
   let preset = args.preset
@@ -125,8 +124,8 @@ export async function apply(ctx: Context, config: AppConfig): Promise<void> {
     agent,
     createAgent: (options, sessionMeta) => resolveAgent(ctx, undefined, options, sessionMeta),
     config: {
-      provider: effectiveProvider,
-      model: effectiveModel,
+      provider,
+      model,
       cwd: config.cwd,
       preset,
     },

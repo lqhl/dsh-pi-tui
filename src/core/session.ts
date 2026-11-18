@@ -6,7 +6,13 @@
 import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
+import {
+  installModelSelection,
+  type Agent,
+  type AgentHandle,
+  type AgentOptions,
+  type AgentSetup,
+} from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import type {
   SessionPersistenceService,
@@ -107,6 +113,13 @@ async function composeSetup(
     }
   } catch {
     return {}
+  }
+}
+
+function withModelSelection(setup?: (agentCtx: Context) => Promise<void>): AgentSetup {
+  return (agentCtx) => {
+    installModelSelection(agentCtx)
+    return setup?.(agentCtx)
   }
 }
 
@@ -277,7 +290,7 @@ export async function resolveAgent(
       const resumed = await ctx.agents.resume({
         resumeSessionId: resumeId,
         agentOptions,
-        ...(composition.setup !== undefined ? { setup: composition.setup } : {}),
+        setup: withModelSelection(composition.setup),
       })
       return { agent: resumed.agent, handle: resumed }
     } catch (error) {
@@ -297,7 +310,7 @@ export async function resolveAgent(
         ...(composition.agentPreset !== undefined ? { agentPreset: composition.agentPreset } : {}),
       },
       agentOptions,
-      ...(composition.setup !== undefined ? { setup: composition.setup } : {}),
+      setup: withModelSelection(composition.setup),
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -351,7 +364,7 @@ export async function forkSession(
       ...(composition.agentPreset !== undefined ? { agentPreset: composition.agentPreset } : {}),
     },
     agentOptions,
-    ...(composition.setup !== undefined ? { setup: composition.setup } : {}),
+    setup: withModelSelection(composition.setup),
   })
   attachWorkspaceOnFirstEvent(ctx, childId, meta.cwd)
   return { agent: created.agent, handle: created }

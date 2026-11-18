@@ -3,6 +3,7 @@
  * `ctx.get(...)`. Centralized so a shape drift in a dsh rc upgrade is fixed
  * in one place instead of scattered inline `as` casts.
  */
+import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 
 export interface SessionProjectionsService {
@@ -65,8 +66,8 @@ export interface JobsService {
 }
 
 export interface AgentDefaultModelService {
-  currentSelection(): { provider?: string; model?: string; reasoningEffort?: string }
-  saveSelection(next: unknown): Promise<void>
+  currentSelection(): ModelSelection
+  saveSelection(next: ModelSelection): Promise<void>
 }
 
 /** Minimal dsh-workspace entity surface (the value `resolveByPath`/`create` return). */

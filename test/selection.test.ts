@@ -10,17 +10,13 @@ test('empty input falls back to the hard-coded route', () => {
   assert.equal(s.reasoningEffort, undefined)
 })
 
-test('persisted header wins over every other source', () => {
-  const s = seedModelSelection({
-    header: { provider: 'h', model: 'hm', reasoningEffort: 'max' },
-    config: { provider: 'c', model: 'cm' },
-    agentOptions: { provider: 'a', model: 'am' },
-    defaults: { provider: 'd', model: 'dm', reasoningEffort: 'high' },
-    prior: { provider: 'p', model: 'pm', reasoningEffort: ReasoningEffortId('off') },
-  })
-  assert.equal(s.provider, 'h')
-  assert.equal(s.model, 'hm')
-  assert.equal(s.reasoningEffort, ReasoningEffortId('max'))
+test('takes the configured default effort for the default route', () => {
+  const defaults = { provider: 'd', model: 'dm', reasoningEffort: ReasoningEffortId('high') }
+  assert.deepEqual(seedModelSelection({ defaults }), defaults)
+  assert.equal(
+    seedModelSelection({ defaults, config: { model: 'other' } }).reasoningEffort,
+    undefined,
+  )
 })
 
 test('row config beats agent options and defaults', () => {
@@ -59,9 +55,9 @@ test('reasoning effort carries over from the prior selection', () => {
   assert.equal(s.model, 'cm')
 })
 
-test('header effort beats the prior effort', () => {
+test('agent options effort beats the prior effort', () => {
   const s = seedModelSelection({
-    header: { provider: 'h', model: 'hm', reasoningEffort: 'off' },
+    agentOptions: { provider: 'a', model: 'am', reasoningEffort: ReasoningEffortId('off') },
     prior: { provider: 'p', model: 'pm', reasoningEffort: ReasoningEffortId('high') },
   })
   assert.equal(s.reasoningEffort, ReasoningEffortId('off'))
